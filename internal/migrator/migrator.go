@@ -63,6 +63,19 @@ func (m *Migrator) currentNum() int64 {
 	return m.cfg.StartFrom
 }
 
+// archiveR2Key returns the R2 key for a batch archive (e.g. 1000001-2000000.tar.zst)
+func (m *Migrator) archiveR2Key(firstNum, lastNum int64) string {
+	ext := ".tar.gz"
+	if m.cfg.Compression == "zstd" {
+		ext = ".tar.zst"
+	}
+	archiveName := fmt.Sprintf("%d-%d%s", firstNum, lastNum, ext)
+	if m.cfg.S3Prefix != "" {
+		return strings.TrimSuffix(m.cfg.S3Prefix, "/") + "/" + archiveName
+	}
+	return archiveName
+}
+
 // Run executes the migration: process fixed-size batches with exact boundaries (e.g. 42400001-42500000)
 func (m *Migrator) Run(ctx context.Context) error {
 	batchStart := m.currentNum()
@@ -90,6 +103,28 @@ func (m *Migrator) Run(ctx context.Context) error {
 		batchEnd := batchStart + m.cfg.BatchDirs - 1
 		if m.cfg.StopAt > 0 && batchEnd > m.cfg.StopAt {
 			batchEnd = m.cfg.StopAt
+		}
+
+		// Skip batch if archive already exists in R2 (e.g. from prior run or manual upload)
+		r2Key := m.archiveR2Key(batchStart, batchEnd)
+		exists, err := m.r2Client.Exists(ctx, r2Key)
+		if err != nil {
+			return fmt.Errorf("check R2 for %s: %w", r2Key, err)
+		}
+		if exists {
+			slog.Info("Batch already in R2, skipping",
+				"range", fmt.Sprintf("%d-%d", batchStart, batchEnd),
+				"key", r2Key)
+			m.state.LastProcessedNumber = batchEnd
+			if err := m.state.Save(m.cfg.StateFile); err != nil {
+				return fmt.Errorf("save state: %w", err)
+			}
+			if batchEnd >= m.cfg.StopAt && m.cfg.StopAt > 0 {
+				slog.Info("Reached stop_at")
+				return nil
+			}
+			batchStart = batchEnd + 1
+			continue
 		}
 
 		batchDir := filepath.Join(m.cfg.WorkDir, fmt.Sprintf("batch_%d", time.Now().Unix()))
@@ -270,19 +305,17 @@ func appendBatchStats(path string, s BatchStats) error {
 
 // flushBatch packs batchDir and uploads to R2 (archive named e.g. 1000001-2000000.tar.gz or .tar.zst)
 func (m *Migrator) flushBatch(ctx context.Context, batchDir string, firstNum, lastNum int64, uncompressedBytes int64) (*BatchStats, error) {
-	firstDir := fmt.Sprintf("%d", firstNum)
-	lastDir := fmt.Sprintf("%d", lastNum)
 	ext := ".tar.gz"
 	if m.cfg.Compression == "zstd" {
 		ext = ".tar.zst"
 	}
-	archiveName := fmt.Sprintf("%s-%s%s", firstDir, lastDir, ext)
+	archiveName := fmt.Sprintf("%d-%d%s", firstNum, lastNum, ext)
 	archivePath := filepath.Join(m.cfg.WorkDir, archiveName)
 	defer os.Remove(archivePath)
 
 	slog.Info("Packing batch", "archive", archiveName)
 	compressStart := time.Now()
-	if err := createTarCompressed(batchDir, archivePath, m.cfg.Compression); err != nil {
+	if err := createTarCompressed(batchDir, archivePath, m.cfg.Compression, m.cfg.CompressionLevel); err != nil {
 		return nil, fmt.Errorf("create archive: %w", err)
 	}
 	compressSec := time.Since(compressStart).Seconds()
@@ -304,10 +337,7 @@ func (m *Migrator) flushBatch(ctx context.Context, batchDir string, firstNum, la
 		"compressed_mb", compressedMB,
 		"reduction_pct", fmt.Sprintf("%.1f%%", ratioPct))
 
-	r2Key := archiveName
-	if m.cfg.S3Prefix != "" {
-		r2Key = strings.TrimSuffix(m.cfg.S3Prefix, "/") + "/" + archiveName
-	}
+	r2Key := m.archiveR2Key(firstNum, lastNum)
 	slog.Info("Uploading to R2", "key", r2Key, "size_mb", compressedMB)
 	uploadStart := time.Now()
 	if err := m.r2Client.Upload(ctx, r2Key, archivePath); err != nil {
@@ -324,7 +354,7 @@ func (m *Migrator) flushBatch(ctx context.Context, batchDir string, firstNum, la
 	}, nil
 }
 
-func createTarCompressed(srcDir, destPath, compression string) error {
+func createTarCompressed(srcDir, destPath, compression string, zstdLevel int) error {
 	f, err := os.Create(destPath)
 	if err != nil {
 		return err
@@ -333,7 +363,8 @@ func createTarCompressed(srcDir, destPath, compression string) error {
 
 	var w io.Writer = f
 	if compression == "zstd" {
-		zw, err := zstd.NewWriter(f)
+		level := zstd.EncoderLevelFromZstd(zstdLevel)
+		zw, err := zstd.NewWriter(f, zstd.WithEncoderLevel(level))
 		if err != nil {
 			return err
 		}

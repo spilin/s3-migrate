@@ -31,6 +31,7 @@ Copy `config.example.yaml` to `config.yaml` and fill in your values.
 | `directory_concurrency` | Parallel directory processing (default 20) |
 | `batch_dirs` | Pack & upload when this many directories accumulated |
 | `compression` | gzip or zstd (zstd ~15-25% better for JSON) |
+| `compression_level` | zstd level 1-22 (default 6; good for JSON; gzip ignores) |
 | `consecutive_empty` | Stop after this many consecutive empty dirs (default 1000) |
 | `work_dir` | Local temp directory for downloads |
 | `state_file` | Path to store last processed number for resume |

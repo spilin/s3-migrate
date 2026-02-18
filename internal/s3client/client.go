@@ -2,6 +2,7 @@ package s3client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,7 +13,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	smithy "github.com/aws/smithy-go"
 )
 
 type ObjectInfo struct {
@@ -98,6 +101,25 @@ func (c *Client) ListCommonPrefixes(ctx context.Context, prefix, delimiter strin
 		}
 	}
 	return prefixes, nil
+}
+
+// Exists returns true if the object exists in the bucket, false if not found.
+// Returns error only for real failures (e.g. network, permissions).
+func (c *Client) Exists(ctx context.Context, key string) (bool, error) {
+	_, err := c.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) {
+			if apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey" {
+				return false, nil
+			}
+		}
+		return false, fmt.Errorf("head object %s: %w", key, err)
+	}
+	return true, nil
 }
 
 // ListObjects returns all objects under prefix with their sizes (no delimiter)
@@ -187,7 +209,9 @@ func (c *Client) Download(ctx context.Context, key, destPath string) error {
 	return fmt.Errorf("get object %s: %w", key, lastErr)
 }
 
-// Upload sends a local file to the bucket
+// Upload sends a local file to the bucket using the SDK's upload manager.
+// For files over ~100MB it automatically uses concurrent multipart upload
+// for better reliability and throughput.
 func (c *Client) Upload(ctx context.Context, key, localPath string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
@@ -195,19 +219,14 @@ func (c *Client) Upload(ctx context.Context, key, localPath string) error {
 	}
 	defer f.Close()
 
-	fi, err := f.Stat()
-	if err != nil {
-		return fmt.Errorf("stat: %w", err)
-	}
-
-	_, err = c.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:        aws.String(c.bucket),
-		Key:           aws.String(key),
-		Body:          f,
-		ContentLength: aws.Int64(fi.Size()),
+	uploader := manager.NewUploader(c.client)
+	_, err = uploader.Upload(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+		Body:   f,
 	})
 	if err != nil {
-		return fmt.Errorf("put object: %w", err)
+		return fmt.Errorf("upload %s: %w", key, err)
 	}
 	return nil
 }

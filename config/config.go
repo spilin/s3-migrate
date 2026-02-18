@@ -32,6 +32,7 @@ type Config struct {
 	DirectoryConcurrency int     // parallel directory processing (default 20)
 	BatchDirs            int64   // pack and upload when this many directories accumulated (e.g. 1000000)
 	Compression          string  // gzip or zstd (default gzip; zstd gives ~15-25% better ratio for JSON)
+	CompressionLevel     int     // zstd level 1-22 (default 6; good for JSON; gzip ignores this)
 	ConsecutiveEmpty     int     // stop after this many consecutive empty dirs (default 1000)
 	WorkDir              string  // local temp dir for downloads
 	StateFile            string  // track last processed number for resume
@@ -79,6 +80,7 @@ func Load() (*Config, error) {
 		DirectoryConcurrency: v.GetInt("directory_concurrency"),
 		BatchDirs:            v.GetInt64("batch_dirs"),
 		Compression:          v.GetString("compression"),
+		CompressionLevel:     v.GetInt("compression_level"),
 		ConsecutiveEmpty:     v.GetInt("consecutive_empty"),
 	}
 
@@ -114,6 +116,12 @@ func Load() (*Config, error) {
 	}
 	if cfg.Compression != "gzip" && cfg.Compression != "zstd" {
 		return nil, fmt.Errorf("compression must be gzip or zstd, got %q", cfg.Compression)
+	}
+	if cfg.Compression == "zstd" && cfg.CompressionLevel <= 0 {
+		cfg.CompressionLevel = 6
+	}
+	if cfg.Compression == "zstd" && (cfg.CompressionLevel < 1 || cfg.CompressionLevel > 22) {
+		return nil, fmt.Errorf("compression_level must be 1-22 when using zstd, got %d", cfg.CompressionLevel)
 	}
 	if cfg.ConsecutiveEmpty <= 0 {
 		cfg.ConsecutiveEmpty = 1000
