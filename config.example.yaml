@@ -1,0 +1,32 @@
+# S3 source (EC2 in same region = free transfer)
+s3:
+  bucket: my-source-bucket
+  prefix: ""              # optional, e.g. "data/" to only migrate under that prefix
+  region: us-east-1
+  endpoint: ""             # leave empty for standard AWS S3
+
+# AWS credentials - use IAM role on EC2 (no keys needed) or profile
+aws:
+  profile: ""
+  region: us-east-1
+
+# Cloudflare R2 destination
+r2:
+  bucket: my-r2-bucket
+  account_id: YOUR_CF_ACCOUNT_ID
+  access_key_id: YOUR_R2_ACCESS_KEY
+  secret_key: YOUR_R2_SECRET_KEY
+  region: auto
+
+# Migration settings - iterate by number, no S3 list of prefixes
+start_from: 9820210      # directory number to start from (e.g. 9820210 -> 000009820210)
+stop_at: 0               # optional max number (0 = no limit)
+pad_width: 12            # zero-pad width for directory names (000009820210)
+download_concurrency: 5   # parallel file downloads per directory (lower if hitting S3 503 SlowDown)
+directory_concurrency: 10 # parallel directory processing (lower if hitting S3 rate limits)
+batch_dirs: 1000000      # pack & upload when this many dirs accumulated (archive: 1000001-2000000.tar.zst)
+compression: zstd         # gzip or zstd (zstd ~15-25% better for JSON)
+consecutive_empty: 1000   # stop after this many consecutive empty dirs
+work_dir: .             # relative to cwd (default: current dir for batches)
+state_file: state.json  # relative to cwd (default: ./state.json)
+stats_file: stats.jsonl # append per-batch stats (compression + download/compress/upload timings); empty = disabled
