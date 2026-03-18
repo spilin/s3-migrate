@@ -9,7 +9,7 @@ A Go application that runs on EC2 to migrate data from an S3 bucket to Cloudflar
 3. **Downloads** all files from those directories to local disk
 4. **Packs** them into a tar.gz or tar.zst archive
 5. **Verifies** the archive (zstd -t / gzip -t style) before upload
-6. **Uploads** the archive to R2 or B2 (under `archives/` prefix) with SHA256 checksum for server-side verification
+6. **Uploads** the archive to R2 or B2 (under `archives/` prefix)
 7. **Persists** progress in a state file for resume on restart
 
 ## Configuration

@@ -4,8 +4,6 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -346,13 +344,12 @@ func (m *Migrator) flushBatch(ctx context.Context, batchDir string, firstNum, la
 	}
 
 	archiveKey := m.archiveKey(firstNum, lastNum)
-	checksumBase64, err := computeSHA256Base64(archivePath)
-	if err != nil {
-		return nil, fmt.Errorf("compute checksum: %w", err)
-	}
+	// Note: ChecksumSHA256 is not used - multipart uploads (files >5MB) expect per-part checksums,
+	// not whole-object SHA256. B2 rejects with BadDigest. Archive verification (zstd -t) above
+	// still validates integrity before upload.
 	slog.Info("Uploading to destination", "key", archiveKey, "size_mb", compressedMB)
 	uploadStart := time.Now()
-	if err := m.r2Client.UploadWithChecksum(ctx, archiveKey, archivePath, checksumBase64); err != nil {
+	if err := m.r2Client.Upload(ctx, archiveKey, archivePath); err != nil {
 		return nil, err
 	}
 	uploadSec := time.Since(uploadStart).Seconds()
@@ -393,21 +390,6 @@ func verifyArchive(path, compression string) error {
 
 	_, err = io.Copy(io.Discard, r)
 	return err
-}
-
-// computeSHA256Base64 returns the base64-encoded SHA256 digest of the file (for S3 ChecksumSHA256 header).
-func computeSHA256Base64(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return base64.StdEncoding.EncodeToString(h.Sum(nil)), nil
 }
 
 func createTarCompressed(srcDir, destPath, compression string, zstdLevel int) error {
