@@ -22,4 +22,4 @@ WORKDIR /app
 # Copy the binary from builder
 COPY --from=builder /build/migrate .
 
-CMD ["./migrate"]
+CMD ["/app/migrate"]

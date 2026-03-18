@@ -42,7 +42,9 @@ func NewS3Client(ctx context.Context, region, endpoint, bucket string) (*Client,
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
 
-	clientOpts := []func(*s3.Options){}
+	clientOpts := []func(*s3.Options){
+		func(o *s3.Options) { o.DisableLogOutputChecksumValidationSkipped = true },
+	}
 	if endpoint != "" {
 		clientOpts = append(clientOpts, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(endpoint)
@@ -75,6 +77,7 @@ func NewR2Client(ctx context.Context, accountID, accessKey, secretKey, bucket st
 
 	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 		o.UsePathStyle = true
+		o.DisableLogOutputChecksumValidationSkipped = true
 	})
 
 	return &Client{client: client, bucket: bucket}, nil
@@ -103,6 +106,7 @@ func NewB2Client(ctx context.Context, region, accessKey, secretKey, bucket strin
 
 	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 		o.UsePathStyle = true
+		o.DisableLogOutputChecksumValidationSkipped = true
 	})
 
 	return &Client{client: client, bucket: bucket}, nil

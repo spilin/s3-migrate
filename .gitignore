@@ -5,5 +5,7 @@ config.yaml
 /tmp/
 migrate-mainnet
 migrate-testnet
+migrate-testnet-b2
+migrate-mainnet-b2
 .DS_Store
 main

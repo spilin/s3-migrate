@@ -21,7 +21,7 @@ r2:
 # Backblaze B2 destination (alternative to R2)
 # b2:
 #   bucket: my-b2-bucket
-#   region: us-west-004       # B2 region (e.g. us-west-004, us-east-005)
+#   region: eu-central-003    # B2 region: us-west-004, us-east-005, eu-central-003 (not eu-central)
 #   access_key_id: YOUR_B2_APPLICATION_KEY_ID
 #   secret_key: YOUR_B2_APPLICATION_KEY
 
