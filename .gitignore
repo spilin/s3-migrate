@@ -1,4 +1,4 @@
-migrate
+/migrate
 
 config.yaml
 *.tar.gz
