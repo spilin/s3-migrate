@@ -10,13 +10,20 @@ aws:
   profile: ""
   region: us-east-1
 
-# Cloudflare R2 destination
+# Cloudflare R2 destination (use r2 OR b2, not both)
 r2:
   bucket: my-r2-bucket
   account_id: YOUR_CF_ACCOUNT_ID
   access_key_id: YOUR_R2_ACCESS_KEY
   secret_key: YOUR_R2_SECRET_KEY
   region: auto
+
+# Backblaze B2 destination (alternative to R2)
+# b2:
+#   bucket: my-b2-bucket
+#   region: us-west-004       # B2 region (e.g. us-west-004, us-east-005)
+#   access_key_id: YOUR_B2_APPLICATION_KEY_ID
+#   secret_key: YOUR_B2_APPLICATION_KEY
 
 # Migration settings - iterate by number, no S3 list of prefixes
 start_from: 9820210      # directory number to start from (e.g. 9820210 -> 000009820210)
@@ -28,6 +35,7 @@ batch_dirs: 1000000      # pack & upload when this many dirs accumulated (archiv
 compression: zstd         # gzip or zstd (zstd ~15-25% better for JSON)
 compression_level: 6      # zstd level 1-22 (default 6; good for JSON; gzip ignores)
 consecutive_empty: 1000   # stop after this many consecutive empty dirs
+archive_prefix: archives # destination prefix for archives (default: archives)
 work_dir: .             # relative to cwd (default: current dir for batches)
 state_file: state.json  # relative to cwd (default: ./state.json)
 stats_file: stats.jsonl # append per-batch stats (compression + download/compress/upload timings); empty = disabled

@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -63,15 +65,16 @@ func (m *Migrator) currentNum() int64 {
 	return m.cfg.StartFrom
 }
 
-// archiveR2Key returns the R2 key for a batch archive (e.g. 1000001-2000000.tar.zst)
-func (m *Migrator) archiveR2Key(firstNum, lastNum int64) string {
+// archiveKey returns the destination key for a batch archive (e.g. archives/1000001-2000000.tar.zst)
+func (m *Migrator) archiveKey(firstNum, lastNum int64) string {
 	ext := ".tar.gz"
 	if m.cfg.Compression == "zstd" {
 		ext = ".tar.zst"
 	}
 	archiveName := fmt.Sprintf("%d-%d%s", firstNum, lastNum, ext)
-	if m.cfg.S3Prefix != "" {
-		return strings.TrimSuffix(m.cfg.S3Prefix, "/") + "/" + archiveName
+	prefix := m.cfg.ArchivePrefix
+	if prefix != "" {
+		return prefix + "/" + archiveName
 	}
 	return archiveName
 }
@@ -105,16 +108,16 @@ func (m *Migrator) Run(ctx context.Context) error {
 			batchEnd = m.cfg.StopAt
 		}
 
-		// Skip batch if archive already exists in R2 (e.g. from prior run or manual upload)
-		r2Key := m.archiveR2Key(batchStart, batchEnd)
-		exists, err := m.r2Client.Exists(ctx, r2Key)
+		// Skip batch if archive already exists in destination (e.g. from prior run or manual upload)
+		archiveKey := m.archiveKey(batchStart, batchEnd)
+		exists, err := m.r2Client.Exists(ctx, archiveKey)
 		if err != nil {
-			return fmt.Errorf("check R2 for %s: %w", r2Key, err)
+			return fmt.Errorf("check destination for %s: %w", archiveKey, err)
 		}
 		if exists {
-			slog.Info("Batch already in R2, skipping",
+			slog.Info("Batch already in destination, skipping",
 				"range", fmt.Sprintf("%d-%d", batchStart, batchEnd),
-				"key", r2Key)
+				"key", archiveKey)
 			m.state.LastProcessedNumber = batchEnd
 			if err := m.state.Save(m.cfg.StateFile); err != nil {
 				return fmt.Errorf("save state: %w", err)
@@ -337,10 +340,19 @@ func (m *Migrator) flushBatch(ctx context.Context, batchDir string, firstNum, la
 		"compressed_mb", compressedMB,
 		"reduction_pct", fmt.Sprintf("%.1f%%", ratioPct))
 
-	r2Key := m.archiveR2Key(firstNum, lastNum)
-	slog.Info("Uploading to R2", "key", r2Key, "size_mb", compressedMB)
+	slog.Info("Verifying archive integrity", "archive", archiveName)
+	if err := verifyArchive(archivePath, m.cfg.Compression); err != nil {
+		return nil, fmt.Errorf("archive verification failed: %w", err)
+	}
+
+	archiveKey := m.archiveKey(firstNum, lastNum)
+	checksumBase64, err := computeSHA256Base64(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("compute checksum: %w", err)
+	}
+	slog.Info("Uploading to destination", "key", archiveKey, "size_mb", compressedMB)
 	uploadStart := time.Now()
-	if err := m.r2Client.Upload(ctx, r2Key, archivePath); err != nil {
+	if err := m.r2Client.UploadWithChecksum(ctx, archiveKey, archivePath, checksumBase64); err != nil {
 		return nil, err
 	}
 	uploadSec := time.Since(uploadStart).Seconds()
@@ -352,6 +364,50 @@ func (m *Migrator) flushBatch(ctx context.Context, batchDir string, firstNum, la
 		CompressSec:    compressSec,
 		UploadSec:      uploadSec,
 	}, nil
+}
+
+// verifyArchive streams through the compressed archive to verify it's not corrupted (like zstd -t / gzip -t).
+func verifyArchive(path, compression string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var r io.Reader = f
+	if compression == "zstd" {
+		zr, err := zstd.NewReader(f)
+		if err != nil {
+			return fmt.Errorf("zstd reader: %w", err)
+		}
+		defer zr.Close()
+		r = zr
+	} else {
+		gzr, err := gzip.NewReader(f)
+		if err != nil {
+			return fmt.Errorf("gzip reader: %w", err)
+		}
+		defer gzr.Close()
+		r = gzr
+	}
+
+	_, err = io.Copy(io.Discard, r)
+	return err
+}
+
+// computeSHA256Base64 returns the base64-encoded SHA256 digest of the file (for S3 ChecksumSHA256 header).
+func computeSHA256Base64(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(h.Sum(nil)), nil
 }
 
 func createTarCompressed(srcDir, destPath, compression string, zstdLevel int) error {
@@ -417,4 +473,3 @@ func createTarCompressed(srcDir, destPath, compression string, zstdLevel int) er
 		return nil
 	})
 }
-

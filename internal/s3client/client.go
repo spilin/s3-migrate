@@ -80,6 +80,34 @@ func NewR2Client(ctx context.Context, accountID, accessKey, secretKey, bucket st
 	return &Client{client: client, bucket: bucket}, nil
 }
 
+// NewB2Client creates a client for Backblaze B2 (S3-compatible).
+// Region is the B2 region (e.g. us-west-004, us-east-005).
+func NewB2Client(ctx context.Context, region, accessKey, secretKey, bucket string) (*Client, error) {
+	if region == "" {
+		region = "us-west-004"
+	}
+	endpoint := fmt.Sprintf("https://s3.%s.backblazeb2.com", region)
+	resolver := aws.EndpointResolverWithOptionsFunc(func(_, _ string, _ ...interface{}) (aws.Endpoint, error) {
+		return aws.Endpoint{URL: endpoint}, nil
+	})
+
+	cfg := aws.Config{
+		Region: region,
+		Credentials: credentials.NewStaticCredentialsProvider(
+			accessKey,
+			secretKey,
+			"",
+		),
+		EndpointResolverWithOptions: resolver,
+	}
+
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.UsePathStyle = true
+	})
+
+	return &Client{client: client, bucket: bucket}, nil
+}
+
 // ListCommonPrefixes returns "directory" prefixes when delimiter is "/"
 func (c *Client) ListCommonPrefixes(ctx context.Context, prefix, delimiter string) ([]string, error) {
 	var prefixes []string
@@ -213,18 +241,30 @@ func (c *Client) Download(ctx context.Context, key, destPath string) error {
 // For files over ~100MB it automatically uses concurrent multipart upload
 // for better reliability and throughput.
 func (c *Client) Upload(ctx context.Context, key, localPath string) error {
+	return c.UploadWithChecksum(ctx, key, localPath, "")
+}
+
+// UploadWithChecksum uploads a file with optional SHA256 checksum verification.
+// If checksumBase64 is non-empty, it is sent as x-amz-checksum-sha256 and the
+// server verifies integrity on receive (S3/R2/B2 compatible).
+func (c *Client) UploadWithChecksum(ctx context.Context, key, localPath, checksumBase64 string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
 	}
 	defer f.Close()
 
-	uploader := manager.NewUploader(c.client)
-	_, err = uploader.Upload(ctx, &s3.PutObjectInput{
+	input := &s3.PutObjectInput{
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(key),
 		Body:   f,
-	})
+	}
+	if checksumBase64 != "" {
+		input.ChecksumSHA256 = aws.String(checksumBase64)
+	}
+
+	uploader := manager.NewUploader(c.client)
+	_, err = uploader.Upload(ctx, input)
 	if err != nil {
 		return fmt.Errorf("upload %s: %w", key, err)
 	}

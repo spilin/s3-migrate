@@ -1,12 +1,25 @@
 FROM golang:1.23-alpine AS builder
-WORKDIR /app
+
+WORKDIR /build
+
+# Copy go mod files
 COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 go build -o /migrate ./cmd/migrate
 
-FROM alpine:3.19
-RUN apk add --no-cache ca-certificates
-COPY --from=builder /migrate /usr/local/bin/migrate
+# Copy source code
+COPY . .
+
+# Build the application
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o migrate ./cmd/migrate
+
+# Final stage
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates
+
 WORKDIR /app
-ENTRYPOINT ["/usr/local/bin/migrate"]
+
+# Copy the binary from builder
+COPY --from=builder /build/migrate .
+
+CMD ["./migrate"]

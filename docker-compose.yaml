@@ -1,0 +1,14 @@
+services:
+  migrate:
+    image: ghcr.io/spilin/s3-migrate:latest
+    container_name: s3-migrate
+    restart: "no"
+    volumes:
+      - ./config:/etc/s3-migrate:ro
+      - ./data:/app/data
+    working_dir: /app/data
+    environment:
+      - S3MIGRATE_WORK_DIR=/app/data
+      - S3MIGRATE_STATE_FILE=/app/data/state.json
+      - S3MIGRATE_STATS_FILE=/app/data/stats.jsonl
+    # env_file: config.env  # uncomment and create config.env for R2/B2 credentials

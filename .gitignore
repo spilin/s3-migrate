@@ -3,3 +3,7 @@ migrate
 config.yaml
 *.tar.gz
 /tmp/
+migrate-mainnet
+migrate-testnet
+.DS_Store
+main

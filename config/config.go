@@ -24,6 +24,12 @@ type Config struct {
 	R2SecretKey    string
 	R2Region       string
 
+	// B2 destination (Backblaze) - if set, used instead of R2
+	B2Bucket       string
+	B2Region       string
+	B2AccessKeyID  string
+	B2SecretKey    string
+
 	// Migration settings
 	StartFrom           int64   // directory number to start from (e.g. 9820210 -> 000009820210)
 	StopAt              int64   // optional max number to process (0 = no limit)
@@ -37,6 +43,7 @@ type Config struct {
 	WorkDir              string  // local temp dir for downloads
 	StateFile            string  // track last processed number for resume
 	StatsFile            string  // append per-batch stats (compression + timings); empty = disabled
+	ArchivePrefix        string  // destination prefix for archives (e.g. archives -> archives/1000001-2000000.tar.zst)
 }
 
 func Load() (*Config, error) {
@@ -70,6 +77,10 @@ func Load() (*Config, error) {
 		R2AccessKeyID:  v.GetString("r2.access_key_id"),
 		R2SecretKey:    v.GetString("r2.secret_key"),
 		R2Region:       v.GetString("r2.region"),
+		B2Bucket:       v.GetString("b2.bucket"),
+		B2Region:       v.GetString("b2.region"),
+		B2AccessKeyID:  v.GetString("b2.access_key_id"),
+		B2SecretKey:    v.GetString("b2.secret_key"),
 		WorkDir:        v.GetString("work_dir"),
 		StateFile:      v.GetString("state_file"),
 		StatsFile:      v.GetString("stats_file"),
@@ -82,6 +93,7 @@ func Load() (*Config, error) {
 		Compression:          v.GetString("compression"),
 		CompressionLevel:     v.GetInt("compression_level"),
 		ConsecutiveEmpty:     v.GetInt("consecutive_empty"),
+		ArchivePrefix:        v.GetString("archive_prefix"),
 	}
 
 	// Defaults (relative to current dir)
@@ -126,6 +138,10 @@ func Load() (*Config, error) {
 	if cfg.ConsecutiveEmpty <= 0 {
 		cfg.ConsecutiveEmpty = 1000
 	}
+	if cfg.ArchivePrefix == "" {
+		cfg.ArchivePrefix = "archives"
+	}
+	cfg.ArchivePrefix = strings.TrimSuffix(cfg.ArchivePrefix, "/")
 
 	// Validation
 	if cfg.S3Bucket == "" {
@@ -134,11 +150,13 @@ func Load() (*Config, error) {
 	if cfg.StartFrom < 0 {
 		return nil, fmt.Errorf("start_from must be >= 0")
 	}
-	if cfg.R2Bucket == "" {
-		return nil, fmt.Errorf("r2.bucket is required")
+	useB2 := cfg.B2Bucket != "" && cfg.B2AccessKeyID != "" && cfg.B2SecretKey != ""
+	useR2 := cfg.R2Bucket != "" && cfg.R2AccountID != "" && cfg.R2AccessKeyID != "" && cfg.R2SecretKey != ""
+	if !useB2 && !useR2 {
+		return nil, fmt.Errorf("either r2 (account_id, access_key_id, secret_key, bucket) or b2 (bucket, access_key_id, secret_key) destination is required")
 	}
-	if cfg.R2AccountID == "" || cfg.R2AccessKeyID == "" || cfg.R2SecretKey == "" {
-		return nil, fmt.Errorf("r2.account_id, r2.access_key_id, r2.secret_key are required")
+	if useB2 && useR2 {
+		return nil, fmt.Errorf("cannot specify both r2 and b2 destination; use one")
 	}
 
 	// Resolve relative paths to absolute (relative to process cwd at load time)
