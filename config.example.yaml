@@ -38,4 +38,4 @@ consecutive_empty: 1000   # stop after this many consecutive empty dirs
 archive_prefix: archives # destination prefix for archives (default: archives)
 work_dir: .             # relative to cwd (default: current dir for batches)
 state_file: state.json  # relative to cwd (default: ./state.json)
-stats_file: stats.jsonl # append per-batch stats (compression + download/compress/upload timings); empty = disabled
+stats_file: stats.jsonl # JSONL: migrate batch stats; validate-ranges appends a line with missing ranges on failure; empty = disabled

@@ -41,6 +41,7 @@ Copy `config.example.yaml` to `config.yaml` and fill in your values.
 | `archive_prefix` | Destination prefix for archives (default: `archives`) |
 | `work_dir` | Local temp directory for downloads |
 | `state_file` | Path to store last processed number for resume |
+| `stats_file` | JSONL: migrate batch stats; `validate-ranges` appends one line (`kind: validate_ranges_missing`) when batches are missing |
 
 ## Environment variables
 
@@ -80,9 +81,12 @@ To validate that all batch archives exist for the configured `[start_from, stop_
 ./migrate validate-ranges
 ```
 
+In Docker Compose, use two argv elements (not one string with a space), e.g. `command: ["/app/migrate", "validate-ranges"]`.
+
 Notes:
 - This command **checks B2** (destination) only. It does **not** query AWS S3.
 - It expects `b2.*` credentials in `config.yaml` and requires `stop_at > 0`.
+- If any batch archives are missing, one JSONL line is **appended to `stats_file`** (same as migrate stats). Lines have `"kind":"validate_ranges_missing"` so you can filter them from per-batch stats.
 
 ## Destination (R2 or B2)
 

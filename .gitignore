@@ -7,6 +7,7 @@ migrate-mainnet
 migrate-testnet
 migrate-testnet-b2
 migrate-mainnet-b2
+validate-testnet-b2
 .DS_Store
 main
 scripts

@@ -2,12 +2,15 @@ package validator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"s3-migrate/config"
 	"s3-migrate/internal/s3client"
@@ -116,6 +119,12 @@ func ValidateRanges(ctx context.Context, cfg *config.Config, b2Client *s3client.
 		} else {
 			slog.Error("First missing ranges (truncated)", "ranges", missing[:50])
 		}
+		if cfg.StatsFile != "" {
+			if err := appendValidateMissingStats(cfg.StatsFile, cfg, missing); err != nil {
+				return fmt.Errorf("append stats (missing ranges): %w", err)
+			}
+			slog.Info("Appended missing batch ranges to stats file", "path", cfg.StatsFile, "count", len(missing))
+		}
 		return fmt.Errorf("missing %d batch archive(s) in b2 for configured range", len(missing))
 	}
 
@@ -143,4 +152,39 @@ func ValidateRanges(ctx context.Context, cfg *config.Config, b2Client *s3client.
 		"found_archives_under_prefix", len(objects))
 
 	return nil
+}
+
+// validateMissingStatsLine is one JSONL line appended to stats_file (same file as migrate batch stats).
+// Filter with `kind == "validate_ranges_missing"`.
+type validateMissingStatsLine struct {
+	Kind        string   `json:"kind"`
+	GeneratedAt string   `json:"generated_at"` // RFC3339 UTC
+	StartFrom   int64    `json:"start_from"`
+	StopAt      int64    `json:"stop_at"`
+	BatchDirs   int64    `json:"batch_dirs"`
+	Missing     []string `json:"missing"` // e.g. "1000001-2000000"
+}
+
+const kindValidateRangesMissing = "validate_ranges_missing"
+
+func appendValidateMissingStats(path string, cfg *config.Config, missing []string) error {
+	rep := validateMissingStatsLine{
+		Kind:        kindValidateRangesMissing,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		StartFrom:   cfg.StartFrom,
+		StopAt:      cfg.StopAt,
+		BatchDirs:   cfg.BatchDirs,
+		Missing:     append([]string(nil), missing...),
+	}
+	line, err := json.Marshal(rep)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(line, '\n'))
+	return err
 }
