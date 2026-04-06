@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -10,6 +11,7 @@ import (
 	"s3-migrate/config"
 	"s3-migrate/internal/migrator"
 	"s3-migrate/internal/s3client"
+	"s3-migrate/internal/validator"
 )
 
 func main() {
@@ -37,6 +39,15 @@ func main() {
 		slog.Info("Shutdown signal received, stopping...")
 		cancel()
 	}()
+
+	if len(os.Args) > 1 && os.Args[1] == "validate-ranges" {
+		if err := runValidateRanges(ctx, cfg); err != nil && err != context.Canceled {
+			slog.Error("Validation failed", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("Validation completed")
+		return
+	}
 
 	// S3 client (source - AWS)
 	s3Region := cfg.S3Region
@@ -85,4 +96,22 @@ func main() {
 	}
 
 	slog.Info("Migration completed")
+}
+
+func runValidateRanges(ctx context.Context, cfg *config.Config) error {
+	// Important: validation checks block batches in B2 (not AWS).
+	useB2 := cfg.B2Bucket != "" && cfg.B2AccessKeyID != "" && cfg.B2SecretKey != ""
+	if !useB2 {
+		return fmt.Errorf("validate-ranges requires b2 destination config (b2.bucket, b2.access_key_id, b2.secret_key)")
+	}
+	if cfg.StopAt <= 0 {
+		return fmt.Errorf("validate-ranges requires stop_at > 0")
+	}
+
+	b2Client, err := s3client.NewB2Client(ctx, cfg.B2Region, cfg.B2AccessKeyID, cfg.B2SecretKey, cfg.B2Bucket)
+	if err != nil {
+		return fmt.Errorf("create b2 client: %w", err)
+	}
+
+	return validator.ValidateRanges(ctx, cfg, b2Client)
 }

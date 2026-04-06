@@ -72,6 +72,18 @@ Config is loaded from `./config/` (mounted to `/etc/s3-migrate`). Work dir, stat
 4. Build: `go build -o migrate ./cmd/migrate`
 5. Run: `./migrate`
 
+## Validate ranges (B2)
+
+To validate that all batch archives exist for the configured `[start_from, stop_at]` range (no missing batch ranges), run:
+
+```bash
+./migrate validate-ranges
+```
+
+Notes:
+- This command **checks B2** (destination) only. It does **not** query AWS S3.
+- It expects `b2.*` credentials in `config.yaml` and requires `stop_at > 0`.
+
 ## Destination (R2 or B2)
 
 **R2:** Create an R2 bucket and generate API tokens in Cloudflare dashboard (R2 → Manage R2 API Tokens).
