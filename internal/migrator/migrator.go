@@ -23,13 +23,14 @@ import (
 )
 
 type Migrator struct {
-	cfg      *config.Config
-	s3Client *s3client.Client
-	r2Client *s3client.Client
-	state    *State
+	cfg          *config.Config
+	sourceClient *s3client.Client // AWS S3 or B2 (list + download)
+	destClient   *s3client.Client // R2 or B2 (upload)
+	state        *State
 }
 
-func New(cfg *config.Config, s3, r2 *s3client.Client) (*Migrator, error) {
+// New creates a migrator. dest may be nil only when using RunDownloadOnly (download to disk without upload).
+func New(cfg *config.Config, source, dest *s3client.Client) (*Migrator, error) {
 	state, err := LoadState(cfg.StateFile)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("load state: %w", err)
@@ -42,13 +43,17 @@ func New(cfg *config.Config, s3, r2 *s3client.Client) (*Migrator, error) {
 		return nil, fmt.Errorf("create work dir: %w", err)
 	}
 
-	return &Migrator{cfg: cfg, s3Client: s3, r2Client: r2, state: state}, nil
+	return &Migrator{cfg: cfg, sourceClient: source, destClient: dest, state: state}, nil
 }
 
-// dirPrefix returns the S3 prefix for a directory number (e.g. 9820210 -> "000009820210/")
+// dirPrefix returns the source object prefix for a directory number (e.g. 9820210 -> "000009820210/")
 func (m *Migrator) dirPrefix(num int64) string {
-	dir := fmt.Sprintf("%0*d", m.cfg.PadWidth, num)
-	base := strings.TrimSuffix(m.cfg.S3Prefix, "/")
+	return dirPrefix(m.cfg, num)
+}
+
+func dirPrefix(cfg *config.Config, num int64) string {
+	dir := fmt.Sprintf("%0*d", cfg.PadWidth, num)
+	base := strings.TrimSuffix(cfg.SourceObjectPrefix(), "/")
 	if base != "" {
 		base += "/"
 	}
@@ -79,9 +84,27 @@ func (m *Migrator) archiveKey(firstNum, lastNum int64) string {
 
 // Run executes the migration: process fixed-size batches with exact boundaries (e.g. 42400001-42500000)
 func (m *Migrator) Run(ctx context.Context) error {
+	if m.destClient == nil {
+		return fmt.Errorf("migrate run requires a destination client; use RunDownloadOnly for download-only mode")
+	}
+	return m.run(ctx, false)
+}
+
+// RunDownloadOnly downloads numbered directories to local batch folders under work_dir like Run, but does not pack or upload.
+// Batch directories that contain files are left on disk (path: work_dir/batch_<unix>/...).
+func (m *Migrator) RunDownloadOnly(ctx context.Context) error {
+	return m.run(ctx, true)
+}
+
+func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
 	batchStart := m.currentNum()
-	slog.Info("Starting migration", "from", batchStart, "resumed", m.state.LastProcessedNumber > 0,
-		"directory_concurrency", m.cfg.DirectoryConcurrency)
+	if downloadOnly {
+		slog.Info("Starting download-only", "from", batchStart, "resumed", m.state.LastProcessedNumber > 0,
+			"directory_concurrency", m.cfg.DirectoryConcurrency)
+	} else {
+		slog.Info("Starting migration", "from", batchStart, "resumed", m.state.LastProcessedNumber > 0,
+			"directory_concurrency", m.cfg.DirectoryConcurrency)
+	}
 
 	dirConcurrency := m.cfg.DirectoryConcurrency
 	if dirConcurrency < 1 {
@@ -106,26 +129,28 @@ func (m *Migrator) Run(ctx context.Context) error {
 			batchEnd = m.cfg.StopAt
 		}
 
-		// Skip batch if archive already exists in destination (e.g. from prior run or manual upload)
-		archiveKey := m.archiveKey(batchStart, batchEnd)
-		exists, err := m.r2Client.Exists(ctx, archiveKey)
-		if err != nil {
-			return fmt.Errorf("check destination for %s: %w", archiveKey, err)
-		}
-		if exists {
-			slog.Info("Batch already in destination, skipping",
-				"range", fmt.Sprintf("%d-%d", batchStart, batchEnd),
-				"key", archiveKey)
-			m.state.LastProcessedNumber = batchEnd
-			if err := m.state.Save(m.cfg.StateFile); err != nil {
-				return fmt.Errorf("save state: %w", err)
+		if !downloadOnly {
+			// Skip batch if archive already exists in destination (e.g. from prior run or manual upload)
+			archiveKey := m.archiveKey(batchStart, batchEnd)
+			exists, err := m.destClient.Exists(ctx, archiveKey)
+			if err != nil {
+				return fmt.Errorf("check destination for %s: %w", archiveKey, err)
 			}
-			if batchEnd >= m.cfg.StopAt && m.cfg.StopAt > 0 {
-				slog.Info("Reached stop_at")
-				return nil
+			if exists {
+				slog.Info("Batch already in destination, skipping",
+					"range", fmt.Sprintf("%d-%d", batchStart, batchEnd),
+					"key", archiveKey)
+				m.state.LastProcessedNumber = batchEnd
+				if err := m.state.Save(m.cfg.StateFile); err != nil {
+					return fmt.Errorf("save state: %w", err)
+				}
+				if batchEnd >= m.cfg.StopAt && m.cfg.StopAt > 0 {
+					slog.Info("Reached stop_at")
+					return nil
+				}
+				batchStart = batchEnd + 1
+				continue
 			}
-			batchStart = batchEnd + 1
-			continue
 		}
 
 		batchDir := filepath.Join(m.cfg.WorkDir, fmt.Sprintf("batch_%d", time.Now().Unix()))
@@ -160,7 +185,7 @@ func (m *Migrator) Run(ctx context.Context) error {
 					}
 
 					prefix := m.dirPrefix(n)
-					objects, err := m.s3Client.ListObjects(gctx, prefix)
+					objects, err := m.sourceClient.ListObjects(gctx, prefix)
 					if err != nil {
 						return fmt.Errorf("list objects under %s: %w", prefix, err)
 					}
@@ -200,19 +225,40 @@ func (m *Migrator) Run(ctx context.Context) error {
 		if hasFiles {
 			downloadSec := time.Since(downloadStart).Seconds()
 			uncompressedMB := batchSizeBytes.Load() / (1024 * 1024)
-			slog.Info("Packing and uploading batch",
-				"range", fmt.Sprintf("%d-%d", batchStart, batchEnd),
-				"uncompressed_mb", uncompressedMB)
-			stats, err := m.flushBatch(ctx, batchDir, batchStart, batchEnd, batchSizeBytes.Load())
-			if err != nil {
-				os.RemoveAll(batchDir)
-				return err
-			}
-			stats.Batch = fmt.Sprintf("%d-%d", batchStart, batchEnd)
-			stats.DownloadSec = downloadSec
-			if m.cfg.StatsFile != "" {
-				if err := appendBatchStats(m.cfg.StatsFile, *stats); err != nil {
-					slog.Warn("Failed to write stats file", "err", err)
+			if downloadOnly {
+				slog.Info("Download batch complete (kept on disk, no pack/upload)",
+					"range", fmt.Sprintf("%d-%d", batchStart, batchEnd),
+					"dir", batchDir,
+					"uncompressed_mb", uncompressedMB,
+					"download_sec", downloadSec)
+				if m.cfg.StatsFile != "" {
+					st := DownloadBatchStats{
+						Kind:           "download_batch",
+						Batch:          fmt.Sprintf("%d-%d", batchStart, batchEnd),
+						LocalDir:       batchDir,
+						UncompressedMB: uncompressedMB,
+						DownloadSec:    downloadSec,
+						DirsDownloaded: dirsDownloaded.Load(),
+					}
+					if err := appendDownloadBatchStats(m.cfg.StatsFile, st); err != nil {
+						slog.Warn("Failed to write stats file", "err", err)
+					}
+				}
+			} else {
+				slog.Info("Packing and uploading batch",
+					"range", fmt.Sprintf("%d-%d", batchStart, batchEnd),
+					"uncompressed_mb", uncompressedMB)
+				stats, err := m.flushBatch(ctx, batchDir, batchStart, batchEnd, batchSizeBytes.Load())
+				if err != nil {
+					os.RemoveAll(batchDir)
+					return err
+				}
+				stats.Batch = fmt.Sprintf("%d-%d", batchStart, batchEnd)
+				stats.DownloadSec = downloadSec
+				if m.cfg.StatsFile != "" {
+					if err := appendBatchStats(m.cfg.StatsFile, *stats); err != nil {
+						slog.Warn("Failed to write stats file", "err", err)
+					}
 				}
 			}
 		}
@@ -221,9 +267,17 @@ func (m *Migrator) Run(ctx context.Context) error {
 			return fmt.Errorf("save state: %w", err)
 		}
 
-		os.RemoveAll(batchDir)
+		if downloadOnly && hasFiles {
+			// Leave batchDir on disk for user to process offline
+		} else {
+			os.RemoveAll(batchDir)
+		}
 		if done.Load() {
-			slog.Info("Migration complete", "reason", "consecutive_empty limit reached")
+			if downloadOnly {
+				slog.Info("Download complete", "reason", "consecutive_empty limit reached")
+			} else {
+				slog.Info("Migration complete", "reason", "consecutive_empty limit reached")
+			}
 			return nil
 		}
 		batchStart = batchEnd + 1
@@ -260,10 +314,10 @@ func (m *Migrator) downloadDirectory(ctx context.Context, prefix string, objects
 				defer func() { <-sem }()
 			}
 
-			relKey := strings.TrimPrefix(obj.Key, m.cfg.S3Prefix)
+			relKey := strings.TrimPrefix(obj.Key, m.cfg.SourceObjectPrefix())
 			localPath := filepath.Join(destDir, relKey)
 			slog.Debug("Downloading", "key", obj.Key)
-			if err := m.s3Client.Download(gctx, obj.Key, localPath); err != nil {
+			if err := m.sourceClient.Download(gctx, obj.Key, localPath); err != nil {
 				return fmt.Errorf("download %s: %w", obj.Key, err)
 			}
 			totalMu.Lock()
@@ -290,7 +344,31 @@ type BatchStats struct {
 	UploadSec      float64 `json:"upload_sec"`
 }
 
+// DownloadBatchStats is a JSONL line for download-only batches (kind: download_batch).
+type DownloadBatchStats struct {
+	Kind           string  `json:"kind"`
+	Batch          string  `json:"batch"`
+	LocalDir       string  `json:"local_dir"`
+	UncompressedMB int64   `json:"uncompressed_mb"`
+	DownloadSec    float64 `json:"download_sec"`
+	DirsDownloaded int64   `json:"dirs_downloaded"`
+}
+
 func appendBatchStats(path string, s BatchStats) error {
+	line, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(line, '\n'))
+	return err
+}
+
+func appendDownloadBatchStats(path string, s DownloadBatchStats) error {
 	line, err := json.Marshal(s)
 	if err != nil {
 		return err
@@ -349,7 +427,7 @@ func (m *Migrator) flushBatch(ctx context.Context, batchDir string, firstNum, la
 	// still validates integrity before upload.
 	slog.Info("Uploading to destination", "key", archiveKey, "size_mb", compressedMB)
 	uploadStart := time.Now()
-	if err := m.r2Client.Upload(ctx, archiveKey, archivePath); err != nil {
+	if err := m.destClient.Upload(ctx, archiveKey, archivePath); err != nil {
 		return nil, err
 	}
 	uploadSec := time.Since(uploadStart).Seconds()

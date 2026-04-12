@@ -41,7 +41,7 @@ func ValidateRanges(ctx context.Context, cfg *config.Config, b2Client *s3client.
 		listPrefix += "/"
 	}
 
-	slog.Info("Listing destination archives", "bucket", cfg.B2Bucket, "prefix", listPrefix)
+	slog.Info("Listing destination archives", "bucket", cfg.DestB2Bucket(), "prefix", listPrefix)
 	objects, err := b2Client.ListObjects(ctx, listPrefix)
 	if err != nil {
 		return fmt.Errorf("list b2 objects under %q: %w", listPrefix, err)

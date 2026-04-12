@@ -1,41 +1,59 @@
-# S3 source (EC2 in same region = free transfer)
-s3:
-  bucket: my-source-bucket
-  prefix: ""              # optional, e.g. "data/" to only migrate under that prefix
-  region: us-east-1
-  endpoint: ""             # leave empty for standard AWS S3
+# Subcommand `download` uses source + work_dir + state_file only (no destination required).
+#
+# Source: exactly one of source.aws or source.b2 (reads numbered dirs from S3-compatible storage).
+# Key prefix before padded dir names is source.*.prefix (e.g. "" -> "000009820210/...").
+source:
+  aws:
+    bucket: my-source-bucket
+    prefix: "" # optional, e.g. "data/"
+    region: us-east-1
+    endpoint: "" # empty = standard AWS S3
 
-# AWS credentials - use IAM role on EC2 (no keys needed) or profile
+# Alternative source — Backblaze B2 (omit source.aws when using this):
+# source:
+#   b2:
+#     bucket: my-source-b2-bucket
+#     prefix: ""
+#     region: eu-central-003
+#     access_key_id: YOUR_B2_APPLICATION_KEY_ID
+#     secret_key: YOUR_B2_APPLICATION_KEY
+
+# Default AWS credential chain / region fallback when source is AWS (IAM on EC2, profile, etc.).
 aws:
   profile: ""
   region: us-east-1
 
-# Cloudflare R2 destination (use r2 OR b2, not both)
-r2:
-  bucket: my-r2-bucket
-  account_id: YOUR_CF_ACCOUNT_ID
-  access_key_id: YOUR_R2_ACCESS_KEY
-  secret_key: YOUR_R2_SECRET_KEY
-  region: auto
+# Destination: exactly one of destination.r2 or destination.b2.
+destination:
+  r2:
+    bucket: my-r2-bucket
+    account_id: YOUR_CF_ACCOUNT_ID
+    access_key_id: YOUR_R2_ACCESS_KEY
+    secret_key: YOUR_R2_SECRET_KEY
+    region: auto
 
-# Backblaze B2 destination (alternative to R2)
-# b2:
-#   bucket: my-b2-bucket
-#   region: eu-central-003    # B2 region: us-west-004, us-east-005, eu-central-003 (not eu-central)
-#   access_key_id: YOUR_B2_APPLICATION_KEY_ID
-#   secret_key: YOUR_B2_APPLICATION_KEY
+# Alternative destination — Backblaze B2 (omit destination.r2 when using this):
+# destination:
+#   b2:
+#     bucket: my-b2-bucket
+#     region: eu-central-003
+#     access_key_id: YOUR_B2_APPLICATION_KEY_ID
+#     secret_key: YOUR_B2_APPLICATION_KEY
 
-# Migration settings - iterate by number, no S3 list of prefixes
-start_from: 9820210      # directory number to start from (e.g. 9820210 -> 000009820210)
-stop_at: 0               # optional max number (0 = no limit)
-pad_width: 12            # zero-pad width for directory names (000009820210)
-download_concurrency: 5   # parallel file downloads per directory (lower if hitting S3 503 SlowDown)
+# Legacy flat keys are still accepted if you omit source/destination blocks:
+#   s3.* + b2_source.* (B2 source) map to source.aws / source.b2; r2.* / b2.* map to destination.
+
+# Migration settings — iterate by number; no S3 list of prefixes
+start_from: 9820210 # directory number to start (e.g. 9820210 -> 000009820210)
+stop_at: 0 # optional max number (0 = no limit)
+pad_width: 12 # zero-pad width for directory names (000009820210)
+download_concurrency: 5 # parallel file downloads per directory (lower if hitting S3 503 SlowDown)
 directory_concurrency: 10 # parallel directory processing (lower if hitting S3 rate limits)
-batch_dirs: 1000000      # pack & upload when this many dirs accumulated (archive: 1000001-2000000.tar.zst)
-compression: zstd         # gzip or zstd (zstd ~15-25% better for JSON)
-compression_level: 6      # zstd level 1-22 (default 6; good for JSON; gzip ignores)
-consecutive_empty: 1000   # stop after this many consecutive empty dirs
+batch_dirs: 1000000 # pack & upload when this many dirs accumulated (archive: 1000001-2000000.tar.zst)
+compression: zstd # gzip or zstd (zstd ~15-25% better for JSON)
+compression_level: 6 # zstd level 1-22 (default 6; good for JSON; gzip ignores)
+consecutive_empty: 1000 # stop after this many consecutive empty dirs
 archive_prefix: archives # destination prefix for archives (default: archives)
-work_dir: .             # relative to cwd (default: current dir for batches)
-state_file: state.json  # relative to cwd (default: ./state.json)
+work_dir: . # relative to cwd (default: current dir for batches)
+state_file: state.json # relative to cwd (default: ./state.json)
 stats_file: stats.jsonl # JSONL: migrate batch stats; validate-ranges appends a line with missing ranges on failure; empty = disabled

@@ -10,7 +10,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o migrate ./cmd/migrate
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o migrate .
 
 # Final stage
 FROM alpine:latest
@@ -22,4 +22,4 @@ WORKDIR /app
 # Copy the binary from builder
 COPY --from=builder /build/migrate .
 
-CMD ["/app/migrate"]
+CMD ["/app/migrate", "run"]

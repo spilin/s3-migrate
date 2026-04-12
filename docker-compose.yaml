@@ -3,7 +3,7 @@ services:
     image: ghcr.io/spilin/s3-migrate:latest
     container_name: s3-migrate
     restart: "no"
-    command: ["/app/migrate"]
+    command: ["/app/migrate", "run"]
     volumes:
       - ./config:/etc/s3-migrate:ro
       - ./data:/app/data

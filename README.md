@@ -1,6 +1,6 @@
 # S3 to R2/B2 Migrator
 
-A Go application that runs on EC2 to migrate data from an S3 bucket to Cloudflare R2 or Backblaze B2. Designed for cost-effective transfer: S3→EC2 (same region) is free, then data is packed and uploaded to R2 or B2. Archives are stored under a configurable prefix (default `archives/`).
+A Go application that runs on EC2 to migrate data from **AWS S3** or **Backblaze B2** (source) into Cloudflare R2 or Backblaze B2 (destination). Designed for cost-effective transfer when the source is AWS S3 in the same region as EC2. Archives are stored under a configurable prefix (default `archives/`).
 
 ## How it works
 
@@ -16,19 +16,35 @@ A Go application that runs on EC2 to migrate data from an S3 bucket to Cloudflar
 
 Copy `config.example.yaml` to `config.yaml` and fill in your values.
 
+CLI layout (similar to `cloud-console-import`): one root binary and subcommands:
+
+```bash
+./migrate help
+./migrate run                              # AWS S3 or B2 source → R2/B2 destination
+./migrate download                         # same as run, but only downloads to work_dir (no pack/upload)
+./migrate validate-ranges                  # B2 batch coverage check
+./migrate exists archives/1-1000.tar.zst   # destination object HeadObject check
+```
+
+Point at a specific config file (any subcommand):
+
+```bash
+./migrate --config /path/to/config.yaml run
+./migrate --config /path/to/config.yaml download
+./migrate --config /path/to/config.yaml validate-ranges
+./migrate --config /path/to/config.yaml exists archives/1000001-2000000.tar.zst
+```
+
+Or set `S3MIGRATE_CONFIG=/path/to/config.yaml`.
+
 | Setting | Description |
 |--------|-------------|
-| `s3.bucket` | Source S3 bucket name |
-| `s3.prefix` | Optional prefix to limit migration (e.g. `data/`) |
-| `s3.region` | AWS region (use same as EC2 for free transfer) |
-| `r2.bucket` | Destination R2 bucket (use r2 OR b2) |
-| `r2.account_id` | Cloudflare account ID |
-| `r2.access_key_id` | R2 API token access key |
-| `r2.secret_key` | R2 API token secret |
-| `b2.bucket` | Destination B2 bucket (alternative to R2) |
-| `b2.region` | B2 region (e.g. `us-west-004`, `us-east-005`) |
-| `b2.access_key_id` | B2 application key ID |
-| `b2.secret_key` | B2 application key |
+| **`source.aws`** | AWS S3 (or custom endpoint) read source — set `bucket` (required), optional `prefix`, `region`, `endpoint` |
+| **`source.b2`** | Backblaze B2 read source — `bucket`, `prefix`, `region`, `access_key_id`, `secret_key` (omit `source.aws` when using B2) |
+| **`destination.r2`** | Cloudflare R2 write destination — `bucket`, `account_id`, `access_key_id`, `secret_key`, optional `region` (default `auto`) |
+| **`destination.b2`** | Backblaze B2 write destination — `bucket`, `region`, `access_key_id`, `secret_key` (use **either** R2 or B2, not both) |
+| `aws.profile` / `aws.region` | Default credential chain / region fallback when `source.aws` is used (IAM on EC2, shared config, etc.) |
+| **Legacy (still supported)** | Flat keys `s3.*`, `b2_source.*`, `r2.*`, `b2.*` are merged into `source` / `destination` when nested blocks are omitted |
 | `start_from` | Directory number to start (e.g. `9820210` → `000009820210/`) |
 | `stop_at` | Optional max number to process (0 = no limit) |
 | `pad_width` | Zero-pad width for dir names (default 12) |
@@ -41,7 +57,7 @@ Copy `config.example.yaml` to `config.yaml` and fill in your values.
 | `archive_prefix` | Destination prefix for archives (default: `archives`) |
 | `work_dir` | Local temp directory for downloads |
 | `state_file` | Path to store last processed number for resume |
-| `stats_file` | JSONL: migrate batch stats; `validate-ranges` appends one line (`kind: validate_ranges_missing`) when batches are missing |
+| `stats_file` | JSONL: migrate batch stats; `download` appends lines with `kind: download_batch`; `validate-ranges` appends `kind: validate_ranges_missing` when batches are missing |
 
 ## Environment variables
 
@@ -70,8 +86,14 @@ Config is loaded from `./config/` (mounted to `/etc/s3-migrate`). Work dir, stat
 1. Launch EC2 in the **same region** as your S3 bucket for free data transfer
 2. Attach an IAM role with `s3:GetObject`, `s3:ListBucket` on the source bucket
 3. Store R2 credentials in SSM Parameter Store or Secrets Manager for security
-4. Build: `go build -o migrate ./cmd/migrate`
-5. Run: `./migrate`
+4. Build: `go build -o migrate .`
+5. Run: `./migrate run`
+
+## Download only (no pack or upload)
+
+`download` uses the same source settings, `work_dir`, `state_file`, batching (`batch_dirs`), and concurrency as `run`, but does **not** read `destination` from config (R2/B2 credentials are optional and ignored). It writes each batch under `work_dir/batch_<unix>/` with the same layout as the migrate download phase (padded directory names under the source prefix) and **does not delete** those folders after a successful batch. Packing, verification, and upload are skipped.
+
+Use a config that defines **source only** (or include destination if you share one file; it is not used). Prefer a dedicated `state_file` (e.g. `state-download.json`) if you also run `run` so progress does not overlap.
 
 ## Validate ranges (B2)
 
@@ -81,12 +103,22 @@ To validate that all batch archives exist for the configured `[start_from, stop_
 ./migrate validate-ranges
 ```
 
-In Docker Compose, use two argv elements (not one string with a space), e.g. `command: ["/app/migrate", "validate-ranges"]`.
+In Docker Compose, use exec-form argv (one string per element), e.g. migration: `command: ["/app/migrate", "run"]`, validation: `command: ["/app/migrate", "validate-ranges"]`.
 
 Notes:
 - This command **checks B2** (destination) only. It does **not** query AWS S3.
-- It expects `b2.*` credentials in `config.yaml` and requires `stop_at > 0`.
+- It expects a **B2 destination** (`destination.b2` or legacy `b2.*`) and requires `stop_at > 0`.
 - If any batch archives are missing, one JSONL line is **appended to `stats_file`** (same as migrate stats). Lines have `"kind":"validate_ranges_missing"` so you can filter them from per-batch stats.
+
+## Check if object exists (destination)
+
+To check whether a specific object key exists in the configured destination store (B2 or R2), run:
+
+```bash
+./migrate exists <object-key>
+```
+
+It prints `FOUND` or `MISSING`. Missing objects exit non-zero.
 
 ## Destination (R2 or B2)
 
