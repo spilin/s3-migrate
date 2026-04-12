@@ -44,6 +44,7 @@ func RootCmd() *cobra.Command {
 	root.AddCommand(
 		runCmd(),
 		downloadCmd(),
+		fixGapsCmd(),
 		existsCmd(),
 		validateRangesCmd(),
 	)

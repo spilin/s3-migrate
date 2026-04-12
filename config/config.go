@@ -77,13 +77,15 @@ type Config struct {
 	StateFile            string
 	StatsFile            string
 	ArchivePrefix        string
+	// FixGapsLog is optional JSONL path for fix-gaps (gap_found / gap_filled / gap_fill_failed lines).
+	FixGapsLog string
 }
 
 func Load() (*Config, error) {
 	if p := strings.TrimSpace(os.Getenv("S3MIGRATE_CONFIG")); p != "" {
 		return LoadFrom(p)
 	}
-	return loadFrom("", false, true)
+	return loadFrom("", false, true, true)
 }
 
 func LoadFrom(path string) (*Config, error) {
@@ -91,7 +93,7 @@ func LoadFrom(path string) (*Config, error) {
 	if path == "" {
 		return nil, fmt.Errorf("config path is empty")
 	}
-	return loadFrom(path, true, true)
+	return loadFrom(path, true, true, true)
 }
 
 // LoadDownloadOnly loads config like Load but does not require destination (source-only commands).
@@ -99,7 +101,7 @@ func LoadDownloadOnly() (*Config, error) {
 	if p := strings.TrimSpace(os.Getenv("S3MIGRATE_CONFIG")); p != "" {
 		return LoadFromDownload(p)
 	}
-	return loadFrom("", false, false)
+	return loadFrom("", false, true, false)
 }
 
 // LoadFromDownload loads config from path without requiring destination credentials.
@@ -108,10 +110,27 @@ func LoadFromDownload(path string) (*Config, error) {
 	if path == "" {
 		return nil, fmt.Errorf("config path is empty")
 	}
-	return loadFrom(path, true, false)
+	return loadFrom(path, true, true, false)
 }
 
-func loadFrom(path string, explicit bool, requireDestination bool) (*Config, error) {
+// LoadFixGaps loads config for fix-gaps (work_dir, pad_width, download_concurrency only; no source or destination required).
+func LoadFixGaps() (*Config, error) {
+	if p := strings.TrimSpace(os.Getenv("S3MIGRATE_CONFIG")); p != "" {
+		return LoadFromFixGaps(p)
+	}
+	return loadFrom("", false, false, false)
+}
+
+// LoadFromFixGaps loads config from path for fix-gaps without requiring source or destination.
+func LoadFromFixGaps(path string) (*Config, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("config path is empty")
+	}
+	return loadFrom(path, true, false, false)
+}
+
+func loadFrom(path string, explicit bool, requireSource, requireDestination bool) (*Config, error) {
 	v := viper.New()
 	v.SetEnvPrefix("S3MIGRATE")
 	v.AutomaticEnv()
@@ -149,6 +168,7 @@ func loadFrom(path string, explicit bool, requireDestination bool) (*Config, err
 		CompressionLevel:     v.GetInt("compression_level"),
 		ConsecutiveEmpty:     v.GetInt("consecutive_empty"),
 		ArchivePrefix:        v.GetString("archive_prefix"),
+		FixGapsLog:           v.GetString("fix_gaps.log_file"),
 	}
 
 	readNestedSourceDest(v, cfg)
@@ -201,15 +221,17 @@ func loadFrom(path string, explicit bool, requireDestination bool) (*Config, err
 	cfg.ArchivePrefix = strings.TrimSuffix(cfg.ArchivePrefix, "/")
 
 	// Validation
-	if err := validateSource(cfg); err != nil {
-		return nil, err
+	if requireSource {
+		if err := validateSource(cfg); err != nil {
+			return nil, err
+		}
 	}
 	if requireDestination {
 		if err := validateDestination(cfg); err != nil {
 			return nil, err
 		}
 	}
-	if cfg.StartFrom < 0 {
+	if requireSource && cfg.StartFrom < 0 {
 		return nil, fmt.Errorf("start_from must be >= 0")
 	}
 
@@ -233,6 +255,13 @@ func loadFrom(path string, explicit bool, requireDestination bool) (*Config, err
 			return nil, fmt.Errorf("resolve stats_file: %w", err)
 		}
 		cfg.StatsFile = abs
+	}
+	if cfg.FixGapsLog != "" && !filepath.IsAbs(cfg.FixGapsLog) {
+		abs, err := filepath.Abs(cfg.FixGapsLog)
+		if err != nil {
+			return nil, fmt.Errorf("resolve fix_gaps.log_file: %w", err)
+		}
+		cfg.FixGapsLog = abs
 	}
 
 	return cfg, nil

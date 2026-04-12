@@ -1,3 +1,7 @@
+# Subcommand `fix-gaps` only needs work_dir, pad_width, download_concurrency (no source/destination).
+# fix_gaps:
+#   log_file: fix_gaps.jsonl   # optional JSONL: gap_found, gap_filled, gap_fill_failed
+#
 # Subcommand `download` uses source + work_dir + state_file only (no destination required).
 # Batches are stored under work_dir/batch_<first>_<last>/ (inclusive directory index range).
 #

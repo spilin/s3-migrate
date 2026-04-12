@@ -22,6 +22,7 @@ CLI layout (similar to `cloud-console-import`): one root binary and subcommands:
 ./migrate help
 ./migrate run                              # AWS S3 or B2 source → R2/B2 destination
 ./migrate download                         # same as run, but only downloads to work_dir (no pack/upload)
+./migrate fix-gaps                         # fill missing padded dirs under batch_* from neardata.xyz
 ./migrate validate-ranges                  # B2 batch coverage check
 ./migrate exists archives/1-1000.tar.zst   # destination object HeadObject check
 ```
@@ -31,6 +32,7 @@ Point at a specific config file (any subcommand):
 ```bash
 ./migrate --config /path/to/config.yaml run
 ./migrate --config /path/to/config.yaml download
+./migrate --config /path/to/config.yaml fix-gaps
 ./migrate --config /path/to/config.yaml validate-ranges
 ./migrate --config /path/to/config.yaml exists archives/1000001-2000000.tar.zst
 ```
@@ -96,6 +98,13 @@ Config is loaded from `./config/` (mounted to `/etc/s3-migrate`). Work dir, stat
 If a target file already exists and is **non-empty**, it is **not** downloaded again (handy for resume); **0-byte** files are always re-downloaded.
 
 Use a config that defines **source only** (or include destination if you share one file; it is not used). Prefer a dedicated `state_file` (e.g. `state-download.json`) if you also run `run` so progress does not overlap.
+
+## fix-gaps (neardata)
+
+For trees produced by `download`, scans `work_dir` for `batch_<first>_<last>/` directories, finds **missing** heights in that inclusive range (a height counts as present only if `<padded>/block.json` exists and is non-empty), then `GET`s `https://mainnet.neardata.xyz/v0/block/<height>` (configurable) and writes `block.json` plus `shard_<shard_id>.json` under `batch_.../<optional-prefix>/<padded>/`, matching `download_fastnear.py`.
+
+- **Config:** `fix-gaps` uses `work_dir`, `pad_width`, and `download_concurrency` only; **source and destination are not required** (a minimal YAML with those keys is enough). Optional **`fix_gaps.log_file`**: append JSONL lines (`kind`: `gap_found`, `gap_filled`, `gap_fill_failed`) for each missing height and each successful or failed neardata fetch.
+- **Flags:** `--neardata-base` (default mainnet block URL; use `https://testnet.neardata.xyz/v0/block` for testnet), `--dry-run` (no HTTP; still writes `gap_found` lines if a log file is set), `--log-file` (overrides `fix_gaps.log_file`).
 
 ## Validate ranges (B2)
 
