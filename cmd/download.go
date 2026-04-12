@@ -20,7 +20,7 @@ func downloadCmd() *cobra.Command {
 		Use:   "download",
 		Short: "Download numbered directories to local disk only (no pack or upload)",
 		Long: "Uses the same source settings and batching as run, but writes files under work_dir " +
-			"(batch_<unix>/...) and does not require destination credentials. State file advances like run.",
+			"(batch_<first>_<last>/..., same numeric range as each batch) and does not require destination credentials. State file advances like run.",
 		PreRunE: func(cmd *cobra.Command, args []string) error {
 			configPath, err := cmd.Root().PersistentFlags().GetString("config")
 			if err != nil {

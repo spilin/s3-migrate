@@ -91,7 +91,9 @@ Config is loaded from `./config/` (mounted to `/etc/s3-migrate`). Work dir, stat
 
 ## Download only (no pack or upload)
 
-`download` uses the same source settings, `work_dir`, `state_file`, batching (`batch_dirs`), and concurrency as `run`, but does **not** read `destination` from config (R2/B2 credentials are optional and ignored). It writes each batch under `work_dir/batch_<unix>/` with the same layout as the migrate download phase (padded directory names under the source prefix) and **does not delete** those folders after a successful batch. Packing, verification, and upload are skipped.
+`download` uses the same source settings, `work_dir`, `state_file`, batching (`batch_dirs`), and concurrency as `run`, but does **not** read `destination` from config (R2/B2 credentials are optional and ignored). Each batch is written under a **deterministic** folder `work_dir/batch_<first>_<last>/` (the inclusive directory-number range for that batch, same bounds as the archive name in `run`). Layout under that folder matches the migrate download phase (padded directory names under the source prefix). Those folders are **not deleted** after a successful batch. Packing, verification, and upload are skipped.
+
+If a target file already exists and is **non-empty**, it is **not** downloaded again (handy for resume); **0-byte** files are always re-downloaded.
 
 Use a config that defines **source only** (or include destination if you share one file; it is not used). Prefer a dedicated `state_file` (e.g. `state-download.json`) if you also run `run` so progress does not overlap.
 

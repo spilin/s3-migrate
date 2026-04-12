@@ -91,9 +91,14 @@ func (m *Migrator) Run(ctx context.Context) error {
 }
 
 // RunDownloadOnly downloads numbered directories to local batch folders under work_dir like Run, but does not pack or upload.
-// Batch directories that contain files are left on disk (path: work_dir/batch_<unix>/...).
+// Batch directories that contain files are left on disk (path: work_dir/batch_<first>_<last>/...).
 func (m *Migrator) RunDownloadOnly(ctx context.Context) error {
 	return m.run(ctx, true)
+}
+
+// batchWorkDir returns a deterministic path for this batch range so retries and download resume use the same tree.
+func batchWorkDir(workDir string, batchStart, batchEnd int64) string {
+	return filepath.Join(workDir, fmt.Sprintf("batch_%d_%d", batchStart, batchEnd))
 }
 
 func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
@@ -153,7 +158,7 @@ func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
 			}
 		}
 
-		batchDir := filepath.Join(m.cfg.WorkDir, fmt.Sprintf("batch_%d", time.Now().Unix()))
+		batchDir := batchWorkDir(m.cfg.WorkDir, batchStart, batchEnd)
 		if err := os.MkdirAll(batchDir, 0755); err != nil {
 			return err
 		}
@@ -200,7 +205,7 @@ func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
 					}
 					consecutiveEmpty.Store(0)
 
-					dirSize, err := m.downloadDirectory(gctx, prefix, objects, batchDir)
+					dirSize, err := m.downloadDirectory(gctx, prefix, objects, batchDir, downloadOnly)
 					if err != nil {
 						return fmt.Errorf("download directory %s: %w", prefix, err)
 					}
@@ -292,8 +297,9 @@ func hasContent(dir string) (bool, error) {
 	return len(entries) > 0, nil
 }
 
-// downloadDirectory downloads all objects under prefix to destDir in parallel, returns total bytes
-func (m *Migrator) downloadDirectory(ctx context.Context, prefix string, objects []s3client.ObjectInfo, destDir string) (int64, error) {
+// downloadDirectory downloads all objects under prefix to destDir in parallel, returns total bytes.
+// When resumeDownload is true (download subcommand), an existing local file with size > 0 is not re-downloaded; 0-byte files are re-fetched.
+func (m *Migrator) downloadDirectory(ctx context.Context, prefix string, objects []s3client.ObjectInfo, destDir string, resumeDownload bool) (int64, error) {
 	concurrency := m.cfg.DownloadConcurrency
 	if concurrency < 1 {
 		concurrency = 10
@@ -316,6 +322,21 @@ func (m *Migrator) downloadDirectory(ctx context.Context, prefix string, objects
 
 			relKey := strings.TrimPrefix(obj.Key, m.cfg.SourceObjectPrefix())
 			localPath := filepath.Join(destDir, relKey)
+			if resumeDownload {
+				fi, err := os.Stat(localPath)
+				if err == nil {
+					if !fi.IsDir() && fi.Size() > 0 {
+						slog.Debug("Skipping existing file", "path", localPath, "size", fi.Size())
+						totalMu.Lock()
+						total += fi.Size()
+						totalMu.Unlock()
+						return nil
+					}
+				} else if !os.IsNotExist(err) {
+					return fmt.Errorf("stat %s: %w", localPath, err)
+				}
+			}
+
 			slog.Debug("Downloading", "key", obj.Key)
 			if err := m.sourceClient.Download(gctx, obj.Key, localPath); err != nil {
 				return fmt.Errorf("download %s: %w", obj.Key, err)

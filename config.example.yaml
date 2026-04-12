@@ -1,4 +1,5 @@
 # Subcommand `download` uses source + work_dir + state_file only (no destination required).
+# Batches are stored under work_dir/batch_<first>_<last>/ (inclusive directory index range).
 #
 # Source: exactly one of source.aws or source.b2 (reads numbered dirs from S3-compatible storage).
 # Key prefix before padded dir names is source.*.prefix (e.g. "" -> "000009820210/...").
