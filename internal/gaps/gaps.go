@@ -1,6 +1,8 @@
 package gaps
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,9 +18,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sync/errgroup"
 
 	"s3-migrate/config"
+	"s3-migrate/internal/s3client"
 )
 
 const defaultNeardataBase = "https://mainnet.neardata.xyz/v0/block"
@@ -25,9 +30,17 @@ const defaultNeardataBase = "https://mainnet.neardata.xyz/v0/block"
 // Options configures fix-gaps HTTP and behavior.
 type Options struct {
 	NeardataBaseURL string // e.g. https://mainnet.neardata.xyz/v0/block (no trailing slash)
+	// NeardataAPIKey, if set, is passed as ?apiKey=... to neardata.xyz.
+	NeardataAPIKey string
 	DryRun          bool
 	// LogFile is JSONL path for gap_found / gap_filled / gap_fill_failed (empty = disabled).
 	LogFile string
+	// ArchiveLocalDir, if set, points to a directory holding batch archives named like run uploads
+	// (e.g. 1000001-2000000.tar.zst). It is used to repair missing shard_<id>.json files.
+	//
+	// If empty and destination credentials are present in config, fix-gaps will download needed
+	// batch archives from destination into work_dir/.archives-cache/.
+	ArchiveLocalDir string
 }
 
 // Run scans work_dir for batch_<first>_<last> directories, finds missing padded height folders,
@@ -37,6 +50,7 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) error {
 	if base == "" {
 		base = defaultNeardataBase
 	}
+	apiKey := strings.TrimSpace(opts.NeardataAPIKey)
 
 	workDir := cfg.WorkDir
 	entries, err := os.ReadDir(workDir)
@@ -48,8 +62,28 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) error {
 	logPath := strings.TrimSpace(opts.LogFile)
 	jl := newJSONLLogger(logPath)
 
+	var destClient *s3client.Client
+	if cfg.UseDestB2() {
+		db := cfg.Destination.B2
+		c, err := s3client.NewB2Client(ctx, db.Region, db.AccessKeyID, db.SecretKey, db.Bucket)
+		if err != nil {
+			return err
+		}
+		destClient = c
+		slog.Info("fix-gaps: archive repair enabled (B2 destination)", "bucket", db.Bucket)
+	} else if cfg.UseDestR2() {
+		dr := cfg.Destination.R2
+		c, err := s3client.NewR2Client(ctx, dr.AccountID, dr.AccessKeyID, dr.SecretKey, dr.Bucket)
+		if err != nil {
+			return err
+		}
+		destClient = c
+		slog.Info("fix-gaps: archive repair enabled (R2 destination)", "bucket", dr.Bucket)
+	}
+
 	var batches int
 	var gapsFilled int64
+	var shardsRestored int64
 	for _, ent := range entries {
 		if !ent.IsDir() {
 			continue
@@ -84,80 +118,90 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) error {
 			}
 		}
 		if len(missing) == 0 {
-			slog.Info("Batch has no gaps", "batch", name, "range", fmt.Sprintf("%d-%d", batchStart, batchEnd))
-			continue
-		}
-		slog.Info("Batch gaps", "batch", name, "missing_count", len(missing), "rel_prefix", relPrefix)
-
-		for _, h := range missing {
-			padded := fmt.Sprintf("%0*d", cfg.PadWidth, h)
-			destDir := filepath.Join(batchDir, relPrefix, padded)
-			jl.appendLine(gapFoundLine{
-				Kind:        "gap_found",
-				GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-				Batch:       name,
-				BatchStart:  batchStart,
-				BatchEnd:    batchEnd,
-				Height:      h,
-				DestDir:     destDir,
-				DryRun:      opts.DryRun,
-			})
+			slog.Info("Batch has no block gaps", "batch", name, "range", fmt.Sprintf("%d-%d", batchStart, batchEnd))
+		} else {
+			slog.Info("Batch gaps", "batch", name, "missing_count", len(missing), "rel_prefix", relPrefix)
 		}
 
-		concurrency := cfg.DownloadConcurrency
-		if concurrency < 1 {
-			concurrency = 10
-		}
-		sem := make(chan struct{}, concurrency)
-		g, gctx := errgroup.WithContext(ctx)
-
-		for _, h := range missing {
-			h := h
-			g.Go(func() error {
-				select {
-				case <-gctx.Done():
-					return gctx.Err()
-				case sem <- struct{}{}:
-					defer func() { <-sem }()
-				}
+		if len(missing) > 0 {
+			for _, h := range missing {
 				padded := fmt.Sprintf("%0*d", cfg.PadWidth, h)
 				destDir := filepath.Join(batchDir, relPrefix, padded)
-				blockURL := base + "/" + strconv.FormatInt(h, 10)
-				if opts.DryRun {
-					slog.Info("dry-run: would fetch gap", "height", h, "dir", destDir)
-					return nil
-				}
-				if err := fetchAndWriteBlock(gctx, client, base, destDir, h); err != nil {
-					jl.appendLine(gapFillFailedLine{
-						Kind:        "gap_fill_failed",
+				jl.appendLine(gapFoundLine{
+					Kind:        "gap_found",
+					GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+					Batch:       name,
+					BatchStart:  batchStart,
+					BatchEnd:    batchEnd,
+					Height:      h,
+					DestDir:     destDir,
+					DryRun:      opts.DryRun,
+				})
+			}
+		}
+
+		if len(missing) > 0 {
+			concurrency := cfg.DownloadConcurrency
+			if concurrency < 1 {
+				concurrency = 10
+			}
+			sem := make(chan struct{}, concurrency)
+			g, gctx := errgroup.WithContext(ctx)
+
+			for _, h := range missing {
+				h := h
+				g.Go(func() error {
+					select {
+					case <-gctx.Done():
+						return gctx.Err()
+					case sem <- struct{}{}:
+						defer func() { <-sem }()
+					}
+					padded := fmt.Sprintf("%0*d", cfg.PadWidth, h)
+					destDir := filepath.Join(batchDir, relPrefix, padded)
+					blockURL := neardataBlockURL(base, h, apiKey)
+					if opts.DryRun {
+						slog.Info("dry-run: would fetch gap", "height", h, "dir", destDir)
+						return nil
+					}
+					if err := fetchAndWriteBlock(gctx, client, base, apiKey, destDir, h); err != nil {
+						jl.appendLine(gapFillFailedLine{
+							Kind:        "gap_fill_failed",
+							GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+							Batch:       name,
+							Height:      h,
+							DestDir:     destDir,
+							NeardataURL: blockURL,
+							Error:       err.Error(),
+						})
+						return fmt.Errorf("height %d: %w", h, err)
+					}
+					jl.appendLine(gapFilledLine{
+						Kind:        "gap_filled",
 						GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 						Batch:       name,
 						Height:      h,
 						DestDir:     destDir,
 						NeardataURL: blockURL,
-						Error:       err.Error(),
 					})
-					return fmt.Errorf("height %d: %w", h, err)
-				}
-				jl.appendLine(gapFilledLine{
-					Kind:        "gap_filled",
-					GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-					Batch:       name,
-					Height:      h,
-					DestDir:     destDir,
-					NeardataURL: blockURL,
+					slog.Info("Filled gap", "height", h, "dir", destDir)
+					return nil
 				})
-				slog.Info("Filled gap", "height", h, "dir", destDir)
-				return nil
-			})
+			}
+			if err := g.Wait(); err != nil {
+				return err
+			}
+			gapsFilled += int64(len(missing))
 		}
-		if err := g.Wait(); err != nil {
+
+		restored, err := repairMissingShards(ctx, cfg, opts, destClient, jl, name, batchDir, relPrefix, batchStart, batchEnd)
+		if err != nil {
 			return err
 		}
-		gapsFilled += int64(len(missing))
+		shardsRestored += restored
 	}
 
-	slog.Info("fix-gaps done", "batch_dirs_scanned", batches, "heights_fetched", gapsFilled)
+	slog.Info("fix-gaps done", "batch_dirs_scanned", batches, "heights_fetched", gapsFilled, "shards_restored", shardsRestored)
 	return nil
 }
 
@@ -233,6 +277,19 @@ type neardataEnvelope struct {
 	Shards []json.RawMessage `json:"shards"`
 }
 
+func neardataBlockURL(baseURL string, height int64, apiKey string) string {
+	u, err := url.Parse(strings.TrimSuffix(baseURL, "/") + "/" + strconv.FormatInt(height, 10))
+	if err != nil || u == nil {
+		return strings.TrimSuffix(baseURL, "/") + "/" + strconv.FormatInt(height, 10)
+	}
+	if apiKey != "" {
+		q := u.Query()
+		q.Set("apiKey", apiKey)
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
+}
+
 func shardIDString(raw json.RawMessage) (string, error) {
 	if len(raw) == 0 {
 		return "", fmt.Errorf("missing shard_id")
@@ -252,8 +309,8 @@ func shardIDString(raw json.RawMessage) (string, error) {
 	return "", fmt.Errorf("unsupported shard_id JSON: %s", string(raw))
 }
 
-func fetchAndWriteBlock(ctx context.Context, client *http.Client, baseURL, destDir string, height int64) error {
-	body, status, err := httpGetWithRetry(ctx, client, baseURL+"/"+strconv.FormatInt(height, 10))
+func fetchAndWriteBlock(ctx context.Context, client *http.Client, baseURL, apiKey, destDir string, height int64) error {
+	body, status, err := httpGetWithRetry(ctx, client, neardataBlockURL(baseURL, height, apiKey))
 	if err != nil {
 		return err
 	}
@@ -422,4 +479,296 @@ func (j *jsonlLogger) appendLine(v interface{}) {
 	if _, err := f.Write(append(line, '\n')); err != nil {
 		slog.Warn("fix-gaps log write failed", "path", j.path, "err", err)
 	}
+}
+
+type blockForShardCheck struct {
+	Chunks []struct {
+		ShardID json.RawMessage `json:"shard_id"`
+	} `json:"chunks"`
+}
+
+func expectedShardIDsFromBlockJSON(path string) ([]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var blk blockForShardCheck
+	if err := json.Unmarshal(b, &blk); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(blk.Chunks))
+	var ids []string
+	for _, ch := range blk.Chunks {
+		s, err := shardIDString(ch.ShardID)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		ids = append(ids, s)
+	}
+	return ids, nil
+}
+
+func archiveKeyForBatch(cfg *config.Config, batchStart, batchEnd int64) string {
+	ext := ".tar.gz"
+	if strings.ToLower(cfg.Compression) == "zstd" {
+		ext = ".tar.zst"
+	}
+	name := fmt.Sprintf("%d-%d%s", batchStart, batchEnd, ext)
+	prefix := strings.TrimSuffix(cfg.ArchivePrefix, "/")
+	if prefix != "" {
+		return prefix + "/" + name
+	}
+	return name
+}
+
+func ensureBatchArchive(ctx context.Context, cfg *config.Config, opts Options, destClient *s3client.Client, batchStart, batchEnd int64) (string, string, error) {
+	archiveKey := archiveKeyForBatch(cfg, batchStart, batchEnd)
+	archiveFile := filepath.Base(archiveKey)
+
+	if dir := strings.TrimSpace(opts.ArchiveLocalDir); dir != "" {
+		p := filepath.Join(dir, archiveFile)
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Size() > 0 {
+			return p, archiveKey, nil
+		}
+		return "", archiveKey, fmt.Errorf("archive not found in archive_local_dir: %s", p)
+	}
+	if destClient == nil {
+		return "", archiveKey, fmt.Errorf("no archive_local_dir and no destination credentials for archive download")
+	}
+
+	cacheDir := filepath.Join(cfg.WorkDir, ".archives-cache")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", archiveKey, err
+	}
+	localPath := filepath.Join(cacheDir, archiveFile)
+	if st, err := os.Stat(localPath); err == nil && !st.IsDir() && st.Size() > 0 {
+		return localPath, archiveKey, nil
+	}
+
+	slog.Info("Downloading batch archive for shard repair", "key", archiveKey, "path", localPath)
+	if err := destClient.Download(ctx, archiveKey, localPath); err != nil {
+		return "", archiveKey, err
+	}
+	return localPath, archiveKey, nil
+}
+
+func extractOneFromArchive(archivePath string, compression string, wantedRelPath string, destPath string) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var r io.Reader = f
+	switch strings.ToLower(compression) {
+	case "zstd":
+		zr, err := zstd.NewReader(f)
+		if err != nil {
+			return err
+		}
+		defer zr.Close()
+		r = zr
+	default:
+		gr, err := gzip.NewReader(f)
+		if err != nil {
+			return err
+		}
+		defer gr.Close()
+		r = gr
+	}
+
+	tr := tar.NewReader(r)
+	want := filepath.ToSlash(wantedRelPath)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return fmt.Errorf("file %s not found in archive", want)
+		}
+		if err != nil {
+			return err
+		}
+		if h == nil || h.Name == "" || h.FileInfo().IsDir() {
+			continue
+		}
+		if h.Name != want {
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			return err
+		}
+		tmp := destPath + ".tmp"
+		out, err := os.Create(tmp)
+		if err != nil {
+			return err
+		}
+		_, cErr := io.Copy(out, tr)
+		closeErr := out.Close()
+		if cErr != nil {
+			os.Remove(tmp)
+			return cErr
+		}
+		if closeErr != nil {
+			os.Remove(tmp)
+			return closeErr
+		}
+		return os.Rename(tmp, destPath)
+	}
+}
+
+func repairMissingShards(
+	ctx context.Context,
+	cfg *config.Config,
+	opts Options,
+	destClient *s3client.Client,
+	jl *jsonlLogger,
+	batchName string,
+	batchDir string,
+	relPrefix string,
+	batchStart int64,
+	batchEnd int64,
+) (int64, error) {
+	var restored int64
+
+	// Walk only directories that look like padded heights directly under relPrefix.
+	root := filepath.Join(batchDir, relPrefix)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		// If relPrefix is empty and batchDir has no dirs, treat as no-op.
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		base := ent.Name()
+		if !isPaddedDigits(base, cfg.PadWidth) {
+			continue
+		}
+		h, err := strconv.ParseInt(base, 10, 64)
+		if err != nil || h < batchStart || h > batchEnd {
+			continue
+		}
+		heightDir := filepath.Join(root, base)
+		blockPath := filepath.Join(heightDir, "block.json")
+		st, err := os.Stat(blockPath)
+		if err != nil || st.IsDir() || st.Size() == 0 {
+			continue
+		}
+
+		expected, err := expectedShardIDsFromBlockJSON(blockPath)
+		if err != nil {
+			return restored, fmt.Errorf("parse %s: %w", blockPath, err)
+		}
+		if len(expected) == 0 {
+			continue
+		}
+
+		for _, sid := range expected {
+			shardName := fmt.Sprintf("shard_%s.json", sid)
+			shardPath := filepath.Join(heightDir, shardName)
+			sst, err := os.Stat(shardPath)
+			if err == nil && !sst.IsDir() && sst.Size() > 0 {
+				continue
+			}
+
+			archivePath, archiveKey, aerr := ensureBatchArchive(ctx, cfg, opts, destClient, batchStart, batchEnd)
+			jl.appendLine(shardMissingLine{
+				Kind:        "shard_missing",
+				GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+				Batch:       batchName,
+				Height:      h,
+				ShardID:     sid,
+				DestPath:    shardPath,
+				ArchiveKey:  archiveKey,
+				DryRun:      opts.DryRun,
+			})
+			if aerr != nil {
+				jl.appendLine(shardFillFailedLine{
+					Kind:        "shard_fill_failed",
+					GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+					Batch:       batchName,
+					Height:      h,
+					ShardID:     sid,
+					DestPath:    shardPath,
+					ArchiveKey:  archiveKey,
+					Error:       aerr.Error(),
+				})
+				return restored, aerr
+			}
+
+			if opts.DryRun {
+				slog.Info("dry-run: would restore shard from archive", "height", h, "shard_id", sid, "dest", shardPath, "archive", archivePath)
+				continue
+			}
+
+			relInArchive := filepath.Join(relPrefix, base, shardName)
+			if err := extractOneFromArchive(archivePath, cfg.Compression, relInArchive, shardPath); err != nil {
+				jl.appendLine(shardFillFailedLine{
+					Kind:        "shard_fill_failed",
+					GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+					Batch:       batchName,
+					Height:      h,
+					ShardID:     sid,
+					DestPath:    shardPath,
+					ArchiveKey:  archiveKey,
+					Error:       err.Error(),
+				})
+				return restored, err
+			}
+			restored++
+			jl.appendLine(shardFilledLine{
+				Kind:        "shard_filled",
+				GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+				Batch:       batchName,
+				Height:      h,
+				ShardID:     sid,
+				DestPath:    shardPath,
+				ArchiveKey:  archiveKey,
+			})
+			slog.Info("Restored shard from archive", "height", h, "shard_id", sid, "path", shardPath)
+		}
+	}
+
+	return restored, nil
+}
+
+type shardMissingLine struct {
+	Kind        string `json:"kind"`
+	GeneratedAt string `json:"generated_at"`
+	Batch       string `json:"batch"`
+	Height      int64  `json:"height"`
+	ShardID     string `json:"shard_id"`
+	DestPath    string `json:"dest_path"`
+	ArchiveKey  string `json:"archive_key,omitempty"`
+	DryRun      bool   `json:"dry_run,omitempty"`
+}
+
+type shardFilledLine struct {
+	Kind        string `json:"kind"`
+	GeneratedAt string `json:"generated_at"`
+	Batch       string `json:"batch"`
+	Height      int64  `json:"height"`
+	ShardID     string `json:"shard_id"`
+	DestPath    string `json:"dest_path"`
+	ArchiveKey  string `json:"archive_key,omitempty"`
+}
+
+type shardFillFailedLine struct {
+	Kind        string `json:"kind"`
+	GeneratedAt string `json:"generated_at"`
+	Batch       string `json:"batch"`
+	Height      int64  `json:"height"`
+	ShardID     string `json:"shard_id"`
+	DestPath    string `json:"dest_path"`
+	ArchiveKey  string `json:"archive_key,omitempty"`
+	Error       string `json:"error"`
 }
