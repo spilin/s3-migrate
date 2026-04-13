@@ -28,13 +28,22 @@ type Client struct {
 	bucket string
 }
 
-// NewS3Client creates a client for AWS S3 (or compatible endpoint)
-func NewS3Client(ctx context.Context, region, endpoint, bucket string) (*Client, error) {
+// NewS3Client creates a client for AWS S3 (or compatible endpoint).
+// If accessKeyID and secretKey are both non-empty, static credentials are used; otherwise the default
+// credential chain applies (env, shared config/profile, IMDS, etc.).
+func NewS3Client(ctx context.Context, region, endpoint, bucket, accessKeyID, secretKey string) (*Client, error) {
 	opts := []func(*config.LoadOptions) error{
 		config.WithRegion(region),
 	}
 	if region == "" {
 		opts = append(opts, config.WithRegion("us-east-1"))
+	}
+	ak := strings.TrimSpace(accessKeyID)
+	sk := strings.TrimSpace(secretKey)
+	if ak != "" && sk != "" {
+		opts = append(opts, config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(ak, sk, ""),
+		))
 	}
 
 	cfg, err := config.LoadDefaultConfig(ctx, opts...)

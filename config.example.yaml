@@ -13,6 +13,9 @@ source:
     prefix: "" # optional, e.g. "data/"
     region: us-east-1
     endpoint: "" # empty = standard AWS S3
+    # Optional: IAM user keys (both required if set). Omit for EC2 role / env / profile.
+    # access_key_id: YOUR_AWS_ACCESS_KEY
+    # secret_key: YOUR_AWS_SECRET_KEY
 
 # Alternative source — Backblaze B2 (omit source.aws when using this):
 # source:

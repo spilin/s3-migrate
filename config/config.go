@@ -21,6 +21,10 @@ type SourceAWS struct {
 	Prefix   string // optional prefix before padded dir names (e.g. "data/")
 	Region   string
 	Endpoint string // empty = default AWS
+	// AccessKeyID and SecretKey are optional: when both are set, they are used for S3 auth instead of
+	// the default credential chain (IAM/IMDS, env, profile). Useful in Docker without instance role.
+	AccessKeyID string
+	SecretKey   string
 }
 
 // SourceB2 is Backblaze B2 as read source (S3-compatible API).
@@ -270,10 +274,12 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 func readNestedSourceDest(v *viper.Viper, cfg *Config) {
 	if v.GetString("source.aws.bucket") != "" {
 		cfg.Source.AWS = &SourceAWS{
-			Bucket:   v.GetString("source.aws.bucket"),
-			Prefix:   v.GetString("source.aws.prefix"),
-			Region:   v.GetString("source.aws.region"),
-			Endpoint: v.GetString("source.aws.endpoint"),
+			Bucket:      v.GetString("source.aws.bucket"),
+			Prefix:      v.GetString("source.aws.prefix"),
+			Region:      v.GetString("source.aws.region"),
+			Endpoint:    v.GetString("source.aws.endpoint"),
+			AccessKeyID: v.GetString("source.aws.access_key_id"),
+			SecretKey:   v.GetString("source.aws.secret_key"),
 		}
 	}
 	if v.GetString("source.b2.bucket") != "" {
@@ -317,10 +323,12 @@ func mergeLegacyFlat(v *viper.Viper, cfg *Config) {
 			}
 		} else if v.GetString("s3.bucket") != "" {
 			cfg.Source.AWS = &SourceAWS{
-				Bucket:   v.GetString("s3.bucket"),
-				Prefix:   v.GetString("s3.prefix"),
-				Region:   v.GetString("s3.region"),
-				Endpoint: v.GetString("s3.endpoint"),
+				Bucket:      v.GetString("s3.bucket"),
+				Prefix:      v.GetString("s3.prefix"),
+				Region:      v.GetString("s3.region"),
+				Endpoint:    v.GetString("s3.endpoint"),
+				AccessKeyID: v.GetString("s3.access_key_id"),
+				SecretKey:   v.GetString("s3.secret_key"),
 			}
 		}
 	}
@@ -358,6 +366,13 @@ func validateSource(cfg *Config) error {
 		partial := cfg.Source.B2.Bucket != "" || cfg.Source.B2.AccessKeyID != "" || cfg.Source.B2.SecretKey != ""
 		if partial && !b2 {
 			return fmt.Errorf("source.b2 requires bucket, access_key_id, and secret_key")
+		}
+	}
+	if cfg.Source.AWS != nil && cfg.Source.AWS.Bucket != "" {
+		ak := cfg.Source.AWS.AccessKeyID != ""
+		sk := cfg.Source.AWS.SecretKey != ""
+		if ak != sk {
+			return fmt.Errorf("source.aws: set both access_key_id and secret_key, or omit both for IAM/default chain")
 		}
 	}
 	return nil

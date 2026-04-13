@@ -46,7 +46,8 @@ func runCmd() *cobra.Command {
 				slog.Info("Using Backblaze B2 as source", "bucket", sb.Bucket)
 			} else {
 				sa := cfg.Source.AWS
-				sourceClient, err = s3client.NewS3Client(ctx, cfg.AWSSourceRegion(), sa.Endpoint, sa.Bucket)
+				sourceClient, err = s3client.NewS3Client(ctx, cfg.AWSSourceRegion(), sa.Endpoint, sa.Bucket,
+					sa.AccessKeyID, sa.SecretKey)
 				if err != nil {
 					return err
 				}
