@@ -205,17 +205,34 @@ func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
 					}
 					consecutiveEmpty.Store(0)
 
-					dirSize, err := m.downloadDirectory(gctx, prefix, objects, batchDir, downloadOnly)
+					dirSize, nSkip, nFetch, err := m.downloadDirectory(gctx, prefix, objects, batchDir, downloadOnly)
 					if err != nil {
 						return fmt.Errorf("download directory %s: %w", prefix, err)
 					}
 					total := batchSizeBytes.Add(dirSize)
 					dirs := dirsDownloaded.Add(1)
-					slog.Info("Downloaded directory",
-						"dir", prefix,
-						"dir_size_mb", dirSize/(1024*1024),
-						"batch_size_mb", total/(1024*1024),
-						"dirs", dirs)
+					if downloadOnly && nFetch == 0 && nSkip > 0 {
+						slog.Info("Skipped directory (already on disk)",
+							"dir", prefix,
+							"files_skipped", nSkip,
+							"dir_size_mb", dirSize/(1024*1024),
+							"batch_size_mb", total/(1024*1024),
+							"dirs", dirs)
+					} else if downloadOnly && nSkip > 0 {
+						slog.Info("Downloaded directory",
+							"dir", prefix,
+							"files_fetched", nFetch,
+							"files_skipped", nSkip,
+							"dir_size_mb", dirSize/(1024*1024),
+							"batch_size_mb", total/(1024*1024),
+							"dirs", dirs)
+					} else {
+						slog.Info("Downloaded directory",
+							"dir", prefix,
+							"dir_size_mb", dirSize/(1024*1024),
+							"batch_size_mb", total/(1024*1024),
+							"dirs", dirs)
+					}
 				}
 			})
 		}
@@ -297,9 +314,10 @@ func hasContent(dir string) (bool, error) {
 	return len(entries) > 0, nil
 }
 
-// downloadDirectory downloads all objects under prefix to destDir in parallel, returns total bytes.
-// When resumeDownload is true (download subcommand), an existing local file with size > 0 is not re-downloaded; 0-byte files are re-fetched.
-func (m *Migrator) downloadDirectory(ctx context.Context, prefix string, objects []s3client.ObjectInfo, destDir string, resumeDownload bool) (int64, error) {
+// downloadDirectory downloads all objects under prefix to destDir in parallel, returns total bytes
+// and per-file skip/fetch counts for logging. When resumeDownload is true (download subcommand),
+// an existing local file with size > 0 is not re-downloaded; 0-byte files are re-fetched.
+func (m *Migrator) downloadDirectory(ctx context.Context, prefix string, objects []s3client.ObjectInfo, destDir string, resumeDownload bool) (totalBytes int64, filesSkipped int64, filesFetched int64, err error) {
 	concurrency := m.cfg.DownloadConcurrency
 	if concurrency < 1 {
 		concurrency = 10
@@ -309,6 +327,8 @@ func (m *Migrator) downloadDirectory(ctx context.Context, prefix string, objects
 	g, gctx := errgroup.WithContext(ctx)
 	var totalMu sync.Mutex
 	var total int64
+	var skipped atomic.Int64
+	var fetched atomic.Int64
 
 	for _, obj := range objects {
 		obj := obj
@@ -327,6 +347,7 @@ func (m *Migrator) downloadDirectory(ctx context.Context, prefix string, objects
 				if err == nil {
 					if !fi.IsDir() && fi.Size() > 0 {
 						slog.Debug("Skipping existing file", "path", localPath, "size", fi.Size())
+						skipped.Add(1)
 						totalMu.Lock()
 						total += fi.Size()
 						totalMu.Unlock()
@@ -341,6 +362,7 @@ func (m *Migrator) downloadDirectory(ctx context.Context, prefix string, objects
 			if err := m.sourceClient.Download(gctx, obj.Key, localPath); err != nil {
 				return fmt.Errorf("download %s: %w", obj.Key, err)
 			}
+			fetched.Add(1)
 			totalMu.Lock()
 			total += obj.Size
 			totalMu.Unlock()
@@ -349,9 +371,9 @@ func (m *Migrator) downloadDirectory(ctx context.Context, prefix string, objects
 	}
 
 	if err := g.Wait(); err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
-	return total, nil
+	return total, skipped.Load(), fetched.Load(), nil
 }
 
 // BatchStats records per-batch compression and timing
