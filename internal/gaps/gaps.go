@@ -79,6 +79,18 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) error {
 		}
 		destClient = c
 		slog.Info("fix-gaps: archive repair enabled (R2 destination)", "bucket", dr.Bucket)
+	} else if cfg.UseDestS3() {
+		ds := cfg.Destination.S3
+		region := strings.TrimSpace(ds.Region)
+		if region == "" {
+			region = "us-east-1"
+		}
+		c, err := s3client.NewS3Client(ctx, region, strings.TrimSpace(ds.Endpoint), ds.Bucket, ds.AccessKeyID, ds.SecretKey)
+		if err != nil {
+			return err
+		}
+		destClient = c
+		slog.Info("fix-gaps: archive repair enabled (S3-compatible destination)", "endpoint", ds.Endpoint, "bucket", ds.Bucket)
 	}
 
 	var batches int

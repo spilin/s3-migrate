@@ -10,13 +10,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"s3-migrate/internal/migrator"
-	"s3-migrate/internal/s3client"
 )
 
 func runCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "run",
-		Short: "Run the migration (AWS S3 or B2 source → R2/B2 destination)",
+		Short: "Run the migration (AWS S3 or B2 source → R2, B2, or S3-compatible destination)",
 		PreRunE: func(cmd *cobra.Command, args []string) error {
 			return loadConfig(cmd)
 		},
@@ -34,43 +33,22 @@ func runCmd() *cobra.Command {
 
 			cfg := loadedConfig
 
-			var sourceClient *s3client.Client
-			var err error
-			if cfg.UseB2Source() {
-				sb := cfg.Source.B2
-				sourceClient, err = s3client.NewB2Client(ctx,
-					sb.Region, sb.AccessKeyID, sb.SecretKey, sb.Bucket)
-				if err != nil {
-					return err
-				}
-				slog.Info("Using Backblaze B2 as source", "bucket", sb.Bucket)
-			} else {
-				sa := cfg.Source.AWS
-				sourceClient, err = s3client.NewS3Client(ctx, cfg.AWSSourceRegion(), sa.Endpoint, sa.Bucket,
-					sa.AccessKeyID, sa.SecretKey)
-				if err != nil {
-					return err
-				}
-				slog.Info("Using AWS S3 as source", "bucket", sa.Bucket)
+			sourceClient, err := newSourceClient(ctx, cfg)
+			if err != nil {
+				return err
 			}
 
-			var destClient *s3client.Client
-			if cfg.UseDestB2() {
-				db := cfg.Destination.B2
-				destClient, err = s3client.NewB2Client(ctx,
-					db.Region, db.AccessKeyID, db.SecretKey, db.Bucket)
-				if err != nil {
-					return err
-				}
-				slog.Info("Using Backblaze B2 as destination", "bucket", db.Bucket)
-			} else {
-				dr := cfg.Destination.R2
-				destClient, err = s3client.NewR2Client(ctx,
-					dr.AccountID, dr.AccessKeyID, dr.SecretKey, dr.Bucket)
-				if err != nil {
-					return err
-				}
-				slog.Info("Using Cloudflare R2 as destination")
+			destClient, err := newDestinationClient(ctx, cfg)
+			if err != nil {
+				return err
+			}
+			switch {
+			case cfg.UseDestB2():
+				slog.Info("Using Backblaze B2 as destination", "bucket", cfg.Destination.B2.Bucket)
+			case cfg.UseDestR2():
+				slog.Info("Using Cloudflare R2 as destination", "bucket", cfg.Destination.R2.Bucket)
+			case cfg.UseDestS3():
+				slog.Info("Using S3-compatible destination (e.g. MinIO)", "endpoint", cfg.Destination.S3.Endpoint, "bucket", cfg.Destination.S3.Bucket)
 			}
 
 			m, err := migrator.New(cfg, sourceClient, destClient)

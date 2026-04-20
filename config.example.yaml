@@ -31,7 +31,7 @@ aws:
   profile: ""
   region: us-east-1
 
-# Destination: exactly one of destination.r2 or destination.b2.
+# Destination: exactly one of destination.r2, destination.b2, or destination.s3 (MinIO / custom S3).
 destination:
   r2:
     bucket: my-r2-bucket
@@ -48,8 +48,28 @@ destination:
 #     access_key_id: YOUR_B2_APPLICATION_KEY_ID
 #     secret_key: YOUR_B2_APPLICATION_KEY
 
+# Alternative destination — MinIO or any S3-compatible API (path-style; omit r2 and b2):
+# destination:
+#   s3:
+#     endpoint: https://minio.example.com:9000
+#     bucket: my-archives-bucket
+#     region: us-east-1 # signing region; optional, default us-east-1
+#     access_key_id: YOUR_MINIO_ACCESS_KEY
+#     secret_key: YOUR_MINIO_SECRET_KEY
+
 # Legacy flat keys are still accepted if you omit source/destination blocks:
 #   s3.* + b2_source.* (B2 source) map to source.aws / source.b2; r2.* / b2.* map to destination.
+
+# Subcommand `copy-archives`: stream existing archive objects from source bucket → destination (no packing).
+# Uses the same source.* bucket/credentials; lists keys under source_prefix (not source.b2.prefix).
+# Default: only copies keys matching <first>-<last>.tar.gz or .tar.zst. Set copy_all_under_prefix: true for any object.
+# archive_copy:
+#   source_prefix: archives/
+#   dest_prefix: "" # empty = use same object key on destination; or e.g. archives to rewrite layout
+#   concurrency: 5 # optional; default download_concurrency
+#   copy_all_under_prefix: false
+#   max_bytes_per_second: 12500000 # optional total cap (~100 Mbit/s) shared across all concurrent copies
+#   # max_megabits_per_second: 100 # alternative to max_bytes_per_second when the latter is 0
 
 # Migration settings — iterate by number; no S3 list of prefixes
 start_from: 9820210 # directory number to start (e.g. 9820210 -> 000009820210)

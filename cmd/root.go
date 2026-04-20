@@ -32,8 +32,8 @@ func loadConfig(cmd *cobra.Command) error {
 func RootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "migrate",
-		Short: "S3 to R2/B2 migration tool",
-		Long:  "Migrate numbered S3 prefixes into packed archives on Cloudflare R2 or Backblaze B2.",
+		Short: "S3 to R2/B2/MinIO migration tool",
+		Long:  "Migrate numbered S3 prefixes into packed archives on Cloudflare R2, Backblaze B2, or S3-compatible storage (e.g. MinIO).",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return cmd.Help()
 		},
@@ -43,6 +43,7 @@ func RootCmd() *cobra.Command {
 
 	root.AddCommand(
 		runCmd(),
+		copyArchivesCmd(),
 		downloadCmd(),
 		fixGapsCmd(),
 		existsCmd(),

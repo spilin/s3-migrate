@@ -36,10 +36,11 @@ type SourceB2 struct {
 	SecretKey   string
 }
 
-// DestinationConfig selects where packed archives are written (exactly one of R2 or B2).
+// DestinationConfig selects where packed archives are written (exactly one of R2, B2, or S3-compatible).
 type DestinationConfig struct {
 	R2 *DestR2
 	B2 *DestB2
+	S3 *DestS3
 }
 
 // DestR2 is Cloudflare R2.
@@ -59,6 +60,27 @@ type DestB2 struct {
 	SecretKey   string
 }
 
+// DestS3 is an S3-compatible write destination (e.g. MinIO) using a custom endpoint.
+type DestS3 struct {
+	Endpoint    string // required, e.g. https://minio.example.com
+	Bucket      string
+	Region      string // signing region; default us-east-1 when empty (typical for MinIO)
+	AccessKeyID string
+	SecretKey   string
+}
+
+// ArchiveCopyConfig is used by the copy-archives command (existing archive objects → destination).
+type ArchiveCopyConfig struct {
+	SourcePrefix       string // list objects under this prefix in the source bucket (e.g. archives/)
+	DestPrefix         string // if non-empty, dest key = dest_prefix + "/" + rel where rel is source key with source_prefix stripped
+	Concurrency        int    // parallel object copies (default from download_concurrency)
+	CopyAllUnderPrefix bool   // if true, copy every object under source_prefix; if false, only *-<first>-<last>.tar.gz|zst names
+	// MaxBytesPerSecond caps total read+upload throughput across all concurrent copies (0 = unlimited).
+	MaxBytesPerSecond int64
+	// MaxMegabitsPerSecond is converted to bytes/sec when MaxBytesPerSecond is 0 (e.g. 100 ≈ 12.5 MiB/s).
+	MaxMegabitsPerSecond float64
+}
+
 // Config holds migration settings and nested source/destination.
 type Config struct {
 	Source      SourceConfig
@@ -67,6 +89,9 @@ type Config struct {
 	// AWSProfile / AWSRegion are used for default credential chain when source is AWS (IAM on EC2, etc.).
 	AWSProfile string
 	AWSRegion  string
+
+	// ArchiveCopy is optional; required for copy-archives subcommand.
+	ArchiveCopy *ArchiveCopyConfig
 
 	StartFrom            int64
 	StopAt               int64
@@ -176,6 +201,7 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 	}
 
 	readNestedSourceDest(v, cfg)
+	readArchiveCopy(v, cfg)
 	mergeLegacyFlat(v, cfg)
 
 	if cfg.R2Region() == "" && cfg.Destination.R2 != nil {
@@ -308,6 +334,70 @@ func readNestedSourceDest(v *viper.Viper, cfg *Config) {
 			SecretKey:   v.GetString("destination.b2.secret_key"),
 		}
 	}
+	if v.GetString("destination.s3.bucket") != "" {
+		cfg.Destination.S3 = &DestS3{
+			Endpoint:    v.GetString("destination.s3.endpoint"),
+			Bucket:      v.GetString("destination.s3.bucket"),
+			Region:      v.GetString("destination.s3.region"),
+			AccessKeyID: v.GetString("destination.s3.access_key_id"),
+			SecretKey:   v.GetString("destination.s3.secret_key"),
+		}
+	}
+}
+
+func readArchiveCopy(v *viper.Viper, cfg *Config) {
+	if strings.TrimSpace(v.GetString("archive_copy.source_prefix")) == "" {
+		return
+	}
+	ac := &ArchiveCopyConfig{
+		SourcePrefix:         v.GetString("archive_copy.source_prefix"),
+		DestPrefix:           v.GetString("archive_copy.dest_prefix"),
+		Concurrency:          v.GetInt("archive_copy.concurrency"),
+		CopyAllUnderPrefix:   v.GetBool("archive_copy.copy_all_under_prefix"),
+		MaxBytesPerSecond:    v.GetInt64("archive_copy.max_bytes_per_second"),
+		MaxMegabitsPerSecond: v.GetFloat64("archive_copy.max_megabits_per_second"),
+	}
+	cfg.ArchiveCopy = ac
+}
+
+// ArchiveCopyDestinationKey maps a source object key to the destination key for copy-archives.
+func (c *Config) ArchiveCopyDestinationKey(sourceKey string) string {
+	if c.ArchiveCopy == nil {
+		return sourceKey
+	}
+	dp := strings.TrimSpace(c.ArchiveCopy.DestPrefix)
+	if dp == "" {
+		return sourceKey
+	}
+	sp := strings.TrimSuffix(strings.TrimSpace(c.ArchiveCopy.SourcePrefix), "/")
+	rel := sourceKey
+	if sp != "" {
+		prefix := sp + "/"
+		if strings.HasPrefix(sourceKey, prefix) {
+			rel = strings.TrimPrefix(sourceKey, prefix)
+		} else if strings.HasPrefix(sourceKey, sp) && len(sourceKey) > len(sp) && sourceKey[len(sp)] == '/' {
+			rel = strings.TrimPrefix(sourceKey, sp+"/")
+		}
+	}
+	dp = strings.TrimSuffix(dp, "/")
+	if rel == "" {
+		return dp
+	}
+	return dp + "/" + rel
+}
+
+// ArchiveCopyMaxBytesPerSecond returns the effective throughput cap for copy-archives (0 = unlimited).
+func (c *Config) ArchiveCopyMaxBytesPerSecond() int64 {
+	if c.ArchiveCopy == nil {
+		return 0
+	}
+	if c.ArchiveCopy.MaxBytesPerSecond > 0 {
+		return c.ArchiveCopy.MaxBytesPerSecond
+	}
+	if c.ArchiveCopy.MaxMegabitsPerSecond > 0 {
+		return int64(c.ArchiveCopy.MaxMegabitsPerSecond * 1e6 / 8.0)
+	}
+	return 0
 }
 
 // mergeLegacyFlat maps old top-level s3/b2/r2/b2_source keys into nested source/destination when nested is absent.
@@ -332,7 +422,7 @@ func mergeLegacyFlat(v *viper.Viper, cfg *Config) {
 			}
 		}
 	}
-	if cfg.Destination.B2 == nil && cfg.Destination.R2 == nil {
+	if cfg.Destination.B2 == nil && cfg.Destination.R2 == nil && cfg.Destination.S3 == nil {
 		if v.GetString("b2.bucket") != "" {
 			cfg.Destination.B2 = &DestB2{
 				Bucket:      v.GetString("b2.bucket"),
@@ -383,11 +473,31 @@ func validateDestination(cfg *Config) error {
 		cfg.Destination.B2.AccessKeyID != "" && cfg.Destination.B2.SecretKey != ""
 	useR2 := cfg.Destination.R2 != nil && cfg.Destination.R2.Bucket != "" &&
 		cfg.Destination.R2.AccountID != "" && cfg.Destination.R2.AccessKeyID != "" && cfg.Destination.R2.SecretKey != ""
-	if !useB2 && !useR2 {
-		return fmt.Errorf("destination: set destination.b2 or destination.r2 (legacy: b2.* or r2.*)")
+	useS3 := cfg.Destination.S3 != nil && cfg.Destination.S3.Bucket != "" &&
+		strings.TrimSpace(cfg.Destination.S3.Endpoint) != "" &&
+		cfg.Destination.S3.AccessKeyID != "" && cfg.Destination.S3.SecretKey != ""
+	n := 0
+	if useB2 {
+		n++
 	}
-	if useB2 && useR2 {
-		return fmt.Errorf("destination: specify only one of destination.b2 or destination.r2")
+	if useR2 {
+		n++
+	}
+	if useS3 {
+		n++
+	}
+	if n == 0 {
+		return fmt.Errorf("destination: set destination.b2, destination.r2, or destination.s3 (legacy: b2.* or r2.*)")
+	}
+	if n > 1 {
+		return fmt.Errorf("destination: specify only one of destination.b2, destination.r2, and destination.s3")
+	}
+	if cfg.Destination.S3 != nil {
+		partial := cfg.Destination.S3.Bucket != "" || strings.TrimSpace(cfg.Destination.S3.Endpoint) != "" ||
+			cfg.Destination.S3.AccessKeyID != "" || cfg.Destination.S3.SecretKey != ""
+		if partial && !useS3 {
+			return fmt.Errorf("destination.s3 requires bucket, endpoint, access_key_id, and secret_key")
+		}
 	}
 	return nil
 }
@@ -446,10 +556,23 @@ func (c *Config) UseDestR2() bool {
 	return d != nil && d.Bucket != "" && d.AccountID != "" && d.AccessKeyID != "" && d.SecretKey != ""
 }
 
-// DestB2Bucket for logging / validator.
+// UseDestS3 reports whether destination is S3-compatible (custom endpoint, e.g. MinIO).
+func (c *Config) UseDestS3() bool {
+	s := c.Destination.S3
+	return s != nil && s.Bucket != "" && strings.TrimSpace(s.Endpoint) != "" &&
+		s.AccessKeyID != "" && s.SecretKey != ""
+}
+
+// DestB2Bucket returns the destination bucket name for logging / listing (B2, R2, or S3-compatible).
 func (c *Config) DestB2Bucket() string {
 	if c.Destination.B2 != nil {
 		return c.Destination.B2.Bucket
+	}
+	if c.Destination.R2 != nil {
+		return c.Destination.R2.Bucket
+	}
+	if c.Destination.S3 != nil {
+		return c.Destination.S3.Bucket
 	}
 	return ""
 }
