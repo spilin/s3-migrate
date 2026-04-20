@@ -11,3 +11,4 @@ validate-testnet-b2
 .DS_Store
 main
 scripts
+s3-migrate
