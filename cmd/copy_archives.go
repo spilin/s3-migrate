@@ -17,6 +17,8 @@ func copyArchivesCmd() *cobra.Command {
 		Short: "Copy existing archive objects from source bucket to destination (no packing)",
 		Long: "Lists objects under archive_copy.source_prefix in the configured source bucket (B2 or S3), " +
 			"and streams each object to the destination (R2, B2, or S3-compatible). " +
+			"Listing uses S3 ListObjectsV2 pagination: Info logs every 10 pages plus first/last; set env S3MIGRATE_LOG_LEVEL=debug for every page " +
+			"(fetch ms, api_is_truncated, api_key_count). Copy work is queued per page so the full key list is not held in memory. " +
 			"Each object is verified: byte count vs HeadObject, optional MD5 when source ETag is a single-part hex digest, " +
 			"and destination size after upload. Use archive_copy.max_bytes_per_second or max_megabits_per_second to cap total throughput. " +
 			"By default only keys matching batch archive names like 1000001-2000000.tar.zst are copied; " +

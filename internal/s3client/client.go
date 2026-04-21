@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,20 +164,40 @@ func (c *Client) Exists(ctx context.Context, key string) (bool, error) {
 	return true, nil
 }
 
-// ListObjects returns all objects under prefix with their sizes (no delimiter)
-func (c *Client) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, error) {
-	var objects []ObjectInfo
+// ListObjectsProgressLogEveryN controls how often WalkObjectPages emits Info-level
+// progress lines between the first and last page (Debug logs every page).
+const ListObjectsProgressLogEveryN = 10
+
+// WalkObjectPages calls fn once per ListObjectsV2 page, in lexicographic key order.
+// morePages is true when additional list pages will follow this one.
+// Logging: one Info line at start; Info every ListObjectsProgressLogEveryN pages plus first
+// and last page; Debug for every page (page fetch latency and sizes). Use
+// S3MIGRATE_LOG_LEVEL=debug to see per-page lines.
+func (c *Client) WalkObjectPages(ctx context.Context, prefix string, fn func(pageIndex int, page []ObjectInfo, morePages bool) error) error {
 	paginator := s3.NewListObjectsV2Paginator(c.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(c.bucket),
 		Prefix: aws.String(prefix),
 	})
 
+	slog.Info("S3 ListObjectsV2 starting", "bucket", c.bucket, "prefix", prefix)
+	listStart := time.Now()
+	var pageIdx int
+	var totalObjects int64
+
 	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
+		pageIdx++
+		pageStart := time.Now()
+		out, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("list objects: %w", err)
+			if errors.Is(err, context.Canceled) {
+				return fmt.Errorf("S3 ListObjectsV2 page %d canceled (signal, docker stop, or parent deadline; objects_so_far=%d): %w",
+					pageIdx, totalObjects, err)
+			}
+			return fmt.Errorf("S3 ListObjectsV2 page %d (objects_so_far=%d): %w", pageIdx, totalObjects, err)
 		}
-		for _, obj := range page.Contents {
+
+		batch := make([]ObjectInfo, 0, len(out.Contents))
+		for _, obj := range out.Contents {
 			if obj.Key == nil {
 				continue
 			}
@@ -184,10 +205,56 @@ func (c *Client) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, 
 			if obj.Size != nil {
 				size = *obj.Size
 			}
-			objects = append(objects, ObjectInfo{Key: *obj.Key, Size: size})
+			batch = append(batch, ObjectInfo{Key: *obj.Key, Size: size})
+		}
+
+		totalObjects += int64(len(batch))
+		more := paginator.HasMorePages()
+		pageMs := time.Since(pageStart).Milliseconds()
+		apiKeyCount := int32(-1)
+		if out.KeyCount != nil {
+			apiKeyCount = *out.KeyCount
+		}
+
+		slog.Debug("S3 ListObjectsV2 page",
+			"bucket", c.bucket, "prefix", prefix,
+			"page", pageIdx, "page_objects", len(batch),
+			"objects_so_far", totalObjects, "more_pages", more,
+			"page_fetch_ms", pageMs,
+			"api_key_count", apiKeyCount,
+			"api_is_truncated", aws.ToBool(out.IsTruncated),
+		)
+		if pageIdx == 1 || pageIdx%ListObjectsProgressLogEveryN == 0 || !more {
+			slog.Info("S3 ListObjectsV2 progress",
+				"bucket", c.bucket, "prefix", prefix,
+				"page", pageIdx, "page_objects", len(batch),
+				"objects_so_far", totalObjects, "more_pages", more,
+				"page_fetch_ms", pageMs,
+				"api_is_truncated", aws.ToBool(out.IsTruncated),
+			)
+		}
+
+		if err := fn(pageIdx, batch, more); err != nil {
+			return err
 		}
 	}
-	return objects, nil
+
+	slog.Info("S3 ListObjectsV2 finished",
+		"bucket", c.bucket, "prefix", prefix,
+		"pages", pageIdx, "objects", totalObjects,
+		"elapsed_ms", time.Since(listStart).Milliseconds(),
+	)
+	return nil
+}
+
+// ListObjects returns all objects under prefix with their sizes (no delimiter).
+func (c *Client) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	var objects []ObjectInfo
+	err := c.WalkObjectPages(ctx, prefix, func(_ int, page []ObjectInfo, _ bool) error {
+		objects = append(objects, page...)
+		return nil
+	})
+	return objects, err
 }
 
 // isRetryableS3Error returns true for 503 SlowDown, 500, 502, etc.
