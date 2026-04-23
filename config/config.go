@@ -108,6 +108,8 @@ type Config struct {
 	ArchivePrefix        string
 	// FixGapsLog is optional JSONL path for fix-gaps (gap_found / gap_filled / gap_fill_failed lines).
 	FixGapsLog string
+	// ArchiveGapsLog is optional JSONL path for archive-gaps (archive_problem / archive_repaired / archive_repair_failed).
+	ArchiveGapsLog string
 }
 
 func Load() (*Config, error) {
@@ -198,6 +200,7 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 		ConsecutiveEmpty:     v.GetInt("consecutive_empty"),
 		ArchivePrefix:        v.GetString("archive_prefix"),
 		FixGapsLog:           v.GetString("fix_gaps.log_file"),
+		ArchiveGapsLog:       v.GetString("archive_gaps.log_file"),
 	}
 
 	readNestedSourceDest(v, cfg)
@@ -292,6 +295,13 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 			return nil, fmt.Errorf("resolve fix_gaps.log_file: %w", err)
 		}
 		cfg.FixGapsLog = abs
+	}
+	if cfg.ArchiveGapsLog != "" && !filepath.IsAbs(cfg.ArchiveGapsLog) {
+		abs, err := filepath.Abs(cfg.ArchiveGapsLog)
+		if err != nil {
+			return nil, fmt.Errorf("resolve archive_gaps.log_file: %w", err)
+		}
+		cfg.ArchiveGapsLog = abs
 	}
 
 	return cfg, nil

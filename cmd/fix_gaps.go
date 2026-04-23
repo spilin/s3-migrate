@@ -21,7 +21,6 @@ func fixGapsCmd() *cobra.Command {
 	var neardataAPIKey string
 	var dryRun bool
 	var logFile string
-	var archivesDir string
 
 	cmd := &cobra.Command{
 		Use:   "fix-gaps",
@@ -72,7 +71,6 @@ func fixGapsCmd() *cobra.Command {
 				NeardataAPIKey:  neardataAPIKey,
 				DryRun:          dryRun,
 				LogFile:         logPath,
-				ArchiveLocalDir: archivesDir,
 			}
 			if err := gaps.Run(ctx, loadedConfig, opts); err != nil && err != context.Canceled {
 				return err
@@ -86,6 +84,5 @@ func fixGapsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&neardataAPIKey, "neardata-api-key", "", "neardata.xyz API key (passed as ?apiKey=...); optional")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "only log gaps, do not fetch or write")
 	cmd.Flags().StringVar(&logFile, "log-file", "", "append JSONL audit log here (overrides fix_gaps.log_file in config); empty disables file log")
-	cmd.Flags().StringVar(&archivesDir, "archives-dir", "", "optional local directory containing batch archives to repair missing shard_<id>.json files (e.g. 1000001-2000000.tar.zst)")
 	return cmd
 }

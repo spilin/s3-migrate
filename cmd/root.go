@@ -46,6 +46,7 @@ func RootCmd() *cobra.Command {
 		copyArchivesCmd(),
 		downloadCmd(),
 		fixGapsCmd(),
+		archiveGapsCmd(),
 		existsCmd(),
 		validateRangesCmd(),
 	)

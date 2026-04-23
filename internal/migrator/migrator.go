@@ -576,3 +576,13 @@ func createTarCompressed(srcDir, destPath, compression string, zstdLevel int) er
 		return nil
 	})
 }
+
+// PackDirectoryToCompressedTar packs srcDir into a tar.gz or tar.zst at destPath (same layout as migrate flushBatch).
+func PackDirectoryToCompressedTar(srcDir, destPath, compression string, zstdLevel int) error {
+	return createTarCompressed(srcDir, destPath, compression, zstdLevel)
+}
+
+// VerifyCompressedTar streams a compressed archive to verify integrity (gzip or zstd).
+func VerifyCompressedTar(archivePath, compression string) error {
+	return verifyArchive(archivePath, compression)
+}

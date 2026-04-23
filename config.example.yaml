@@ -2,6 +2,10 @@
 # fix_gaps:
 #   log_file: fix_gaps.jsonl   # optional JSONL: gap_found, gap_filled, gap_fill_failed
 #
+# Subcommand `archive-gaps` needs destination + work_dir + archive_prefix; optional JSONL default path:
+# archive_gaps:
+#   log_file: archive_gaps.jsonl   # archive_problem, archive_repaired, archive_repair_failed
+#
 # Subcommand `download` uses source + work_dir + state_file only (no destination required).
 # Batches are stored under work_dir/batch_<first>_<last>/ (inclusive directory index range).
 #
