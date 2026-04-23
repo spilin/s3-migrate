@@ -9,7 +9,9 @@
 # Subcommand `download` uses source + work_dir + state_file only (no destination required).
 # Batches are stored under work_dir/batch_<first>_<last>/ (inclusive directory index range).
 #
-# Source: exactly one of source.aws or source.b2 (reads numbered dirs from S3-compatible storage).
+# Source: exactly one of source.aws, source.s3, or source.b2 (reads numbered dirs from S3-compatible storage).
+# source.aws and source.s3 are the same S3 read API and the same fields; use source.s3 if you also use
+# destination.s3 (symmetric naming). Do not set both source.aws and source.s3 in one file.
 # Key prefix before padded dir names is source.*.prefix (e.g. "" -> "000009820210/...").
 source:
   aws:
@@ -20,6 +22,14 @@ source:
     # Optional: IAM user keys (both required if set). Omit for EC2 role / env / profile.
     # access_key_id: YOUR_AWS_ACCESS_KEY
     # secret_key: YOUR_AWS_SECRET_KEY
+
+# Same as source.aws, alternative key name only:
+# source:
+#   s3:
+#     bucket: my-source-bucket
+#     prefix: ""
+#     region: us-east-1
+#     endpoint: ""
 
 # Alternative source — Backblaze B2 (omit source.aws when using this):
 # source:
@@ -35,7 +45,8 @@ aws:
   profile: ""
   region: us-east-1
 
-# Destination: exactly one of destination.r2, destination.b2, or destination.s3 (MinIO / custom S3).
+# Destination: exactly one of destination.r2, destination.b2, or destination.s3.
+# (destination.s3 is the S3 API write path with a non-empty endpoint — MinIO, or regional AWS S3 URL, etc.)
 destination:
   r2:
     bucket: my-r2-bucket

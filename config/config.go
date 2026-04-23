@@ -9,13 +9,14 @@ import (
 	"github.com/spf13/viper"
 )
 
-// SourceConfig selects where numbered directories are read from (exactly one of AWS or B2).
+// SourceConfig selects where numbered directories are read from (exactly one of S3 or B2).
 type SourceConfig struct {
 	AWS *SourceAWS
 	B2  *SourceB2
 }
 
-// SourceAWS is S3-compatible source (AWS or custom endpoint).
+// SourceAWS is the S3 API read source. In YAML it is loaded from **source.aws** or **source.s3**
+// (same fields; use source.s3 for symmetry with destination.s3).
 type SourceAWS struct {
 	Bucket   string
 	Prefix   string // optional prefix before padded dir names (e.g. "data/")
@@ -60,7 +61,7 @@ type DestB2 struct {
 	SecretKey   string
 }
 
-// DestS3 is an S3-compatible write destination (e.g. MinIO) using a custom endpoint.
+// DestS3 is the S3 API write path (destination.s3). Use a non-empty endpoint (MinIO, or AWS S3 URL, etc.).
 type DestS3 struct {
 	Endpoint    string // required, e.g. https://minio.example.com
 	Bucket      string
@@ -203,7 +204,9 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 		ArchiveGapsLog:       v.GetString("archive_gaps.log_file"),
 	}
 
-	readNestedSourceDest(v, cfg)
+	if err := readNestedSourceDest(v, cfg); err != nil {
+		return nil, err
+	}
 	readArchiveCopy(v, cfg)
 	mergeLegacyFlat(v, cfg)
 
@@ -307,8 +310,13 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 	return cfg, nil
 }
 
-func readNestedSourceDest(v *viper.Viper, cfg *Config) {
-	if v.GetString("source.aws.bucket") != "" {
+func readNestedSourceDest(v *viper.Viper, cfg *Config) error {
+	awsBucket := strings.TrimSpace(v.GetString("source.aws.bucket"))
+	s3Bucket := strings.TrimSpace(v.GetString("source.s3.bucket"))
+	if awsBucket != "" && s3Bucket != "" {
+		return fmt.Errorf("config: set only one of source.aws and source.s3 (both are the S3 read API; same fields as each other and as destination.s3, except destination is write)")
+	}
+	if awsBucket != "" {
 		cfg.Source.AWS = &SourceAWS{
 			Bucket:      v.GetString("source.aws.bucket"),
 			Prefix:      v.GetString("source.aws.prefix"),
@@ -316,6 +324,15 @@ func readNestedSourceDest(v *viper.Viper, cfg *Config) {
 			Endpoint:    v.GetString("source.aws.endpoint"),
 			AccessKeyID: v.GetString("source.aws.access_key_id"),
 			SecretKey:   v.GetString("source.aws.secret_key"),
+		}
+	} else if s3Bucket != "" {
+		cfg.Source.AWS = &SourceAWS{
+			Bucket:      v.GetString("source.s3.bucket"),
+			Prefix:      v.GetString("source.s3.prefix"),
+			Region:      v.GetString("source.s3.region"),
+			Endpoint:    v.GetString("source.s3.endpoint"),
+			AccessKeyID: v.GetString("source.s3.access_key_id"),
+			SecretKey:   v.GetString("source.s3.secret_key"),
 		}
 	}
 	if v.GetString("source.b2.bucket") != "" {
@@ -353,6 +370,7 @@ func readNestedSourceDest(v *viper.Viper, cfg *Config) {
 			SecretKey:   v.GetString("destination.s3.secret_key"),
 		}
 	}
+	return nil
 }
 
 func readArchiveCopy(v *viper.Viper, cfg *Config) {
@@ -457,10 +475,10 @@ func validateSource(cfg *Config) error {
 	b2 := cfg.Source.B2 != nil && cfg.Source.B2.Bucket != "" &&
 		cfg.Source.B2.AccessKeyID != "" && cfg.Source.B2.SecretKey != ""
 	if aws && b2 {
-		return fmt.Errorf("source: specify only one of source.aws or source.b2 (legacy: s3.* or b2_source.*)")
+		return fmt.Errorf("source: specify only one of source.aws (or source.s3), or source.b2 (legacy: s3.* or b2_source.*)")
 	}
 	if !aws && !b2 {
-		return fmt.Errorf("source: set source.aws or source.b2 (legacy: s3.bucket or b2_source.*)")
+		return fmt.Errorf("source: set source.aws, source.s3, or source.b2 (legacy: s3.bucket or b2_source.*)")
 	}
 	if cfg.Source.B2 != nil {
 		partial := cfg.Source.B2.Bucket != "" || cfg.Source.B2.AccessKeyID != "" || cfg.Source.B2.SecretKey != ""
@@ -472,7 +490,7 @@ func validateSource(cfg *Config) error {
 		ak := cfg.Source.AWS.AccessKeyID != ""
 		sk := cfg.Source.AWS.SecretKey != ""
 		if ak != sk {
-			return fmt.Errorf("source.aws: set both access_key_id and secret_key, or omit both for IAM/default chain")
+			return fmt.Errorf("source (source.aws or source.s3): set both access_key_id and secret_key, or omit both for IAM/default chain")
 		}
 	}
 	return nil
