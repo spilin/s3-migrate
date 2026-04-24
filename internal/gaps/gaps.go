@@ -3,6 +3,7 @@ package gaps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -22,6 +23,9 @@ import (
 )
 
 const defaultNeardataBase = "https://mainnet.neardata.xyz/v0/block"
+
+// ErrNeardataNotFound is returned when neardata responds with HTTP 404 for a block height.
+var ErrNeardataNotFound = errors.New("neardata: block not found")
 
 // Options configures fix-gaps HTTP and behavior.
 type Options struct {
@@ -243,6 +247,16 @@ type neardataEnvelope struct {
 	Shards []json.RawMessage `json:"shards"`
 }
 
+// NeardataBlockURL builds the neardata GET URL for height (same as requests from FillHeightFromNeardata).
+// Pass empty apiKey to omit ?apiKey= from the string (e.g. for logs).
+func NeardataBlockURL(baseURL string, height int64, apiKey string) string {
+	base := strings.TrimSuffix(strings.TrimSpace(baseURL), "/")
+	if base == "" {
+		base = defaultNeardataBase
+	}
+	return neardataBlockURL(base, height, apiKey)
+}
+
 func neardataBlockURL(baseURL string, height int64, apiKey string) string {
 	u, err := url.Parse(strings.TrimSuffix(baseURL, "/") + "/" + strconv.FormatInt(height, 10))
 	if err != nil || u == nil {
@@ -281,7 +295,7 @@ func fetchAndWriteBlock(ctx context.Context, client *http.Client, baseURL, apiKe
 		return err
 	}
 	if status == http.StatusNotFound {
-		return fmt.Errorf("neardata 404 for height %d", height)
+		return fmt.Errorf("height %d: %w", height, ErrNeardataNotFound)
 	}
 	if status != http.StatusOK {
 		return fmt.Errorf("neardata status %d for height %d", status, height)
@@ -350,6 +364,13 @@ func writeJSONIndentFile(path string, raw json.RawMessage) error {
 	return os.Rename(tmp, path)
 }
 
+func redactURLQuery(raw string) string {
+	if i := strings.IndexByte(raw, '?'); i >= 0 {
+		return raw[:i]
+	}
+	return raw
+}
+
 func httpGetWithRetry(ctx context.Context, client *http.Client, url string) ([]byte, int, error) {
 	sleep := 200 * time.Millisecond
 	for attempt := 0; ; attempt++ {
@@ -362,7 +383,7 @@ func httpGetWithRetry(ctx context.Context, client *http.Client, url string) ([]b
 			if attempt >= 12 {
 				return nil, 0, err
 			}
-			slog.Warn("HTTP error, retrying", "url", url, "err", err, "attempt", attempt+1)
+			slog.Warn("HTTP error, retrying", "url", redactURLQuery(url), "err", err, "attempt", attempt+1)
 			select {
 			case <-ctx.Done():
 				return nil, 0, ctx.Err()
@@ -382,7 +403,7 @@ func httpGetWithRetry(ctx context.Context, client *http.Client, url string) ([]b
 			if attempt >= 20 {
 				return body, resp.StatusCode, fmt.Errorf("giving up after status %d", resp.StatusCode)
 			}
-			slog.Warn("HTTP status, retrying", "url", url, "status", resp.StatusCode, "attempt", attempt+1)
+			slog.Warn("HTTP status, retrying", "url", redactURLQuery(url), "status", resp.StatusCode, "attempt", attempt+1)
 			select {
 			case <-ctx.Done():
 				return nil, 0, ctx.Err()

@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -79,6 +80,28 @@ type archiveRepairFailedLine struct {
 	Error       string `json:"error"`
 }
 
+// neardataBlockNotFoundLine is logged when neardata returns 404 for a height (data missing from API).
+type neardataBlockNotFoundLine struct {
+	Kind         string `json:"kind"`
+	GeneratedAt  string `json:"generated_at"`
+	ArchiveKey   string `json:"archive_key"`
+	BatchStart   int64  `json:"batch_start"`
+	BatchEnd     int64  `json:"batch_end"`
+	Height       int64  `json:"height"`
+	NeardataURL  string `json:"neardata_url"` // path only; apiKey omitted
+}
+
+type archiveRepairSkippedIncompleteLine struct {
+	Kind                     string           `json:"kind"`
+	GeneratedAt              string           `json:"generated_at"`
+	ArchiveKey               string           `json:"archive_key"`
+	BatchStart               int64            `json:"batch_start"`
+	BatchEnd                 int64            `json:"batch_end"`
+	MissingHeights           []int64          `json:"missing_heights,omitempty"`
+	HeightsWithMissingShards []heightShardGap `json:"heights_with_missing_shards,omitempty"`
+	Reason                   string           `json:"reason,omitempty"`
+}
+
 type jsonlLogger struct {
 	path string
 	mu   sync.Mutex
@@ -99,6 +122,13 @@ func (j *jsonlLogger) appendLine(v interface{}) {
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	dir := filepath.Dir(j.path)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			slog.Warn("archive-gaps log mkdir failed", "path", dir, "err", err)
+			return
+		}
+	}
 	f, err := os.OpenFile(j.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		slog.Warn("archive-gaps log open failed", "path", j.path, "err", err)
@@ -368,6 +398,19 @@ func processOneArchive(
 			}
 			if err := gaps.FillHeightFromNeardata(egCtx, httpClient, opts.NeardataBaseURL, opts.NeardataAPIKey,
 				extractDir, relPrefix, cfg.PadWidth, h); err != nil {
+				if errors.Is(err, gaps.ErrNeardataNotFound) {
+					jl.appendLine(neardataBlockNotFoundLine{
+						Kind:        "neardata_block_not_found",
+						GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+						ArchiveKey:  ent.key,
+						BatchStart:  ent.first,
+						BatchEnd:    ent.last,
+						Height:      h,
+						NeardataURL: gaps.NeardataBlockURL(opts.NeardataBaseURL, h, ""),
+					})
+					slog.Info("archive-gaps: neardata 404 for height, skipping", "key", ent.key, "height", h)
+					return nil
+				}
 				return fmt.Errorf("height %d: %w", h, err)
 			}
 			slog.Info("archive-gaps: refetched height from neardata", "key", ent.key, "height", h)
@@ -384,6 +427,52 @@ func processOneArchive(
 			Error:       err.Error(),
 		})
 		return fmt.Errorf("archive %s: %w", ent.key, err)
+	}
+
+	_, heightsAfter, err := gaps.ScanBatchHeights(extractDir, cfg.PadWidth, ent.first, ent.last)
+	if err != nil {
+		jl.appendLine(archiveRepairFailedLine{
+			Kind:        "archive_repair_failed",
+			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+			ArchiveKey:  ent.key,
+			BatchStart:  ent.first,
+			BatchEnd:    ent.last,
+			Error:       fmt.Sprintf("rescan after repair: %v", err),
+		})
+		return fmt.Errorf("rescan %s: %w", ent.key, err)
+	}
+	var stillMissing []int64
+	for h := ent.first; h <= ent.last; h++ {
+		if !heightsAfter[h] {
+			stillMissing = append(stillMissing, h)
+		}
+	}
+	shardGapsAfter, err := findMissingShards(extractDir, relPrefix, cfg, ent.first, ent.last)
+	if err != nil {
+		jl.appendLine(archiveRepairFailedLine{
+			Kind:        "archive_repair_failed",
+			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+			ArchiveKey:  ent.key,
+			BatchStart:  ent.first,
+			BatchEnd:    ent.last,
+			Error:       fmt.Sprintf("shard rescan after repair: %v", err),
+		})
+		return fmt.Errorf("shard rescan %s: %w", ent.key, err)
+	}
+	if len(stillMissing) > 0 || len(shardGapsAfter) > 0 {
+		jl.appendLine(archiveRepairSkippedIncompleteLine{
+			Kind:                     "archive_repair_skipped_incomplete",
+			GeneratedAt:              time.Now().UTC().Format(time.RFC3339),
+			ArchiveKey:               ent.key,
+			BatchStart:               ent.first,
+			BatchEnd:                 ent.last,
+			MissingHeights:           stillMissing,
+			HeightsWithMissingShards: shardGapsAfter,
+			Reason:                   "gaps remain after neardata refetch (e.g. 404); object not replaced on destination",
+		})
+		slog.Warn("archive-gaps: not uploading — archive still incomplete",
+			"key", ent.key, "missing_heights", len(stillMissing), "shard_gap_heights", len(shardGapsAfter))
+		return nil
 	}
 
 	outPath := filepath.Join(stage, filepath.Base(ent.key))
