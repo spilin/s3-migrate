@@ -13,9 +13,12 @@ import (
 )
 
 func runCmd() *cobra.Command {
-	return &cobra.Command{
+	var neardataBase string
+	var neardataAPIKey string
+
+	cmd := &cobra.Command{
 		Use:   "run",
-		Short: "Run the migration (AWS S3 or B2 source → R2, B2, or S3-compatible destination)",
+		Short: "Run the migration (B2/S3 sources → R2, B2, or S3-compatible destination)",
 		PreRunE: func(cmd *cobra.Command, args []string) error {
 			return loadConfig(cmd)
 		},
@@ -33,7 +36,7 @@ func runCmd() *cobra.Command {
 
 			cfg := loadedConfig
 
-			sourceClient, err := newSourceClient(ctx, cfg)
+			sources, err := newMigrationSources(ctx, cfg)
 			if err != nil {
 				return err
 			}
@@ -51,7 +54,10 @@ func runCmd() *cobra.Command {
 				slog.Info("Using S3-compatible destination (e.g. MinIO)", "endpoint", cfg.Destination.S3.Endpoint, "bucket", cfg.Destination.S3.Bucket)
 			}
 
-			m, err := migrator.New(cfg, sourceClient, destClient)
+			m, err := migrator.NewWithSources(cfg, sources, destClient, migrator.Options{
+				NeardataBaseURL: effectiveNeardataBaseURL(cmd, neardataBase, cfg),
+				NeardataAPIKey:  effectiveNeardataAPIKey(cmd, neardataAPIKey, cfg),
+			})
 			if err != nil {
 				return err
 			}
@@ -63,4 +69,8 @@ func runCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&neardataBase, "neardata-base", "",
+		"neardata block API base URL fallback (overrides neardata.base_url; default https://mainnet.neardata.xyz/v0/block)")
+	cmd.Flags().StringVar(&neardataAPIKey, "neardata-api-key", "", "neardata.xyz API key (?apiKey=...); optional")
+	return cmd
 }

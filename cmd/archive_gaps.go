@@ -68,8 +68,8 @@ func archiveGapsCmd() *cobra.Command {
 			}
 
 			opts := archivegaps.Options{
-				NeardataBaseURL: neardataBase,
-				NeardataAPIKey:  neardataAPIKey,
+				NeardataBaseURL: effectiveNeardataBaseURL(cmd, neardataBase, cfg),
+				NeardataAPIKey:  effectiveNeardataAPIKey(cmd, neardataAPIKey, cfg),
 				DryRun:          dryRun,
 				LogFile:         logPath,
 			}
@@ -80,8 +80,8 @@ func archiveGapsCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&neardataBase, "neardata-base", "https://mainnet.neardata.xyz/v0/block",
-		"neardata block API base URL (no trailing slash); use https://testnet.neardata.xyz/v0/block for testnet")
+	cmd.Flags().StringVar(&neardataBase, "neardata-base", "",
+		"neardata block API base URL (overrides neardata.base_url; default https://mainnet.neardata.xyz/v0/block)")
 	cmd.Flags().StringVar(&neardataAPIKey, "neardata-api-key", "", "neardata.xyz API key (?apiKey=...); optional")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "detect and log problems only; do not refetch, repack, or upload")
 	cmd.Flags().StringVar(&logFile, "log-file", "", "append JSONL here (overrides archive_gaps.log_file); required if config has no archive_gaps.log_file")

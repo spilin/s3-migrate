@@ -5,9 +5,11 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,18 +21,43 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"s3-migrate/config"
+	"s3-migrate/internal/gaps"
 	"s3-migrate/internal/s3client"
 )
 
+// Source is one ordered block data source used by migration.
+type Source struct {
+	Name   string
+	Prefix string
+	Client *s3client.Client
+}
+
+// Options configures optional migration fallbacks.
+type Options struct {
+	NeardataBaseURL string
+	NeardataAPIKey  string
+}
+
 type Migrator struct {
-	cfg          *config.Config
-	sourceClient *s3client.Client // AWS S3 or B2 (list + download)
-	destClient   *s3client.Client // R2 or B2 (upload)
-	state        *State
+	cfg        *config.Config
+	sources    []Source
+	destClient *s3client.Client // R2, B2, or S3-compatible destination (upload)
+	state      *State
+	opts       Options
+	httpClient *http.Client
 }
 
 // New creates a migrator. dest may be nil only when using RunDownloadOnly (download to disk without upload).
 func New(cfg *config.Config, source, dest *s3client.Client) (*Migrator, error) {
+	return NewWithSources(cfg, []Source{{
+		Name:   "source",
+		Prefix: cfg.SourceObjectPrefix(),
+		Client: source,
+	}}, dest, Options{})
+}
+
+// NewWithSources creates a migrator with ordered sources. dest may be nil only for RunDownloadOnly.
+func NewWithSources(cfg *config.Config, sources []Source, dest *s3client.Client, opts Options) (*Migrator, error) {
 	state, err := LoadState(cfg.StateFile)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("load state: %w", err)
@@ -43,17 +70,38 @@ func New(cfg *config.Config, source, dest *s3client.Client) (*Migrator, error) {
 		return nil, fmt.Errorf("create work dir: %w", err)
 	}
 
-	return &Migrator{cfg: cfg, sourceClient: source, destClient: dest, state: state}, nil
+	var cleanSources []Source
+	for _, src := range sources {
+		if src.Client == nil {
+			continue
+		}
+		if strings.TrimSpace(src.Name) == "" {
+			src.Name = "source"
+		}
+		cleanSources = append(cleanSources, src)
+	}
+	if len(cleanSources) == 0 {
+		return nil, fmt.Errorf("migration requires at least one source client")
+	}
+
+	return &Migrator{
+		cfg:        cfg,
+		sources:    cleanSources,
+		destClient: dest,
+		state:      state,
+		opts:       opts,
+		httpClient: &http.Client{Timeout: 60 * time.Second},
+	}, nil
 }
 
 // dirPrefix returns the source object prefix for a directory number (e.g. 9820210 -> "000009820210/")
 func (m *Migrator) dirPrefix(num int64) string {
-	return dirPrefix(m.cfg, num)
+	return dirPrefix(m.cfg.SourceObjectPrefix(), m.cfg.PadWidth, num)
 }
 
-func dirPrefix(cfg *config.Config, num int64) string {
-	dir := fmt.Sprintf("%0*d", cfg.PadWidth, num)
-	base := strings.TrimSuffix(cfg.SourceObjectPrefix(), "/")
+func dirPrefix(sourcePrefix string, padWidth int, num int64) string {
+	dir := fmt.Sprintf("%0*d", padWidth, num)
+	base := strings.TrimSuffix(sourcePrefix, "/")
 	if base != "" {
 		base += "/"
 	}
@@ -189,23 +237,39 @@ func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
 						return nil
 					}
 
-					prefix := m.dirPrefix(n)
-					objects, err := m.sourceClient.ListObjects(gctx, prefix)
+					src, prefix, objects, err := m.findSourceObjects(gctx, n)
 					if err != nil {
-						return fmt.Errorf("list objects under %s: %w", prefix, err)
+						return err
 					}
 
 					if len(objects) == 0 {
+						dirSize, fetched, err := m.fillHeightFromNeardata(gctx, batchDir, n)
+						if err != nil {
+							return err
+						}
+						if fetched {
+							consecutiveEmpty.Store(0)
+							total := batchSizeBytes.Add(dirSize)
+							dirs := dirsDownloaded.Add(1)
+							slog.Info("Downloaded directory from neardata",
+								"height", n,
+								"dir", m.dirPrefix(n),
+								"dir_size_mb", dirSize/(1024*1024),
+								"batch_size_mb", total/(1024*1024),
+								"dirs", dirs)
+							continue
+						}
+
 						empty := consecutiveEmpty.Add(1)
 						if empty >= int64(m.cfg.ConsecutiveEmpty) {
 							done.Store(true)
 						}
-						slog.Debug("Skipping empty directory", "prefix", prefix)
+						slog.Debug("Skipping empty directory", "height", n, "prefix", m.dirPrefix(n))
 						continue
 					}
 					consecutiveEmpty.Store(0)
 
-					dirSize, nSkip, nFetch, err := m.downloadDirectory(gctx, prefix, objects, batchDir, downloadOnly)
+					dirSize, nSkip, nFetch, err := m.downloadDirectory(gctx, src, objects, batchDir, downloadOnly)
 					if err != nil {
 						return fmt.Errorf("download directory %s: %w", prefix, err)
 					}
@@ -214,6 +278,7 @@ func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
 					if downloadOnly && nFetch == 0 && nSkip > 0 {
 						slog.Info("Skipped directory (already on disk)",
 							"dir", prefix,
+							"source", src.Name,
 							"files_skipped", nSkip,
 							"dir_size_mb", dirSize/(1024*1024),
 							"batch_size_mb", total/(1024*1024),
@@ -221,6 +286,7 @@ func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
 					} else if downloadOnly && nSkip > 0 {
 						slog.Info("Downloaded directory",
 							"dir", prefix,
+							"source", src.Name,
 							"files_fetched", nFetch,
 							"files_skipped", nSkip,
 							"dir_size_mb", dirSize/(1024*1024),
@@ -229,6 +295,7 @@ func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
 					} else {
 						slog.Info("Downloaded directory",
 							"dir", prefix,
+							"source", src.Name,
 							"dir_size_mb", dirSize/(1024*1024),
 							"batch_size_mb", total/(1024*1024),
 							"dirs", dirs)
@@ -314,10 +381,47 @@ func hasContent(dir string) (bool, error) {
 	return len(entries) > 0, nil
 }
 
+func (m *Migrator) findSourceObjects(ctx context.Context, height int64) (Source, string, []s3client.ObjectInfo, error) {
+	var zero Source
+	for _, src := range m.sources {
+		prefix := dirPrefix(src.Prefix, m.cfg.PadWidth, height)
+		objects, err := src.Client.ListObjects(ctx, prefix)
+		if err != nil {
+			return zero, "", nil, fmt.Errorf("list objects from %s under %s: %w", src.Name, prefix, err)
+		}
+		if len(objects) > 0 {
+			return src, prefix, objects, nil
+		}
+		slog.Debug("Source has no directory", "source", src.Name, "height", height, "prefix", prefix)
+	}
+	return zero, "", nil, nil
+}
+
+func (m *Migrator) fillHeightFromNeardata(ctx context.Context, batchDir string, height int64) (int64, bool, error) {
+	base := strings.TrimSpace(m.opts.NeardataBaseURL)
+	if base == "" {
+		return 0, false, nil
+	}
+	if err := gaps.FillHeightFromNeardata(ctx, m.httpClient, base, m.opts.NeardataAPIKey,
+		batchDir, "", m.cfg.PadWidth, height); err != nil {
+		if errors.Is(err, gaps.ErrNeardataNotFound) {
+			slog.Debug("Neardata has no block", "height", height, "url", gaps.NeardataBlockURL(base, height, ""))
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("fetch height %d from neardata: %w", height, err)
+	}
+	dir := filepath.Join(batchDir, fmt.Sprintf("%0*d", m.cfg.PadWidth, height))
+	size, err := directorySize(dir)
+	if err != nil {
+		return 0, false, err
+	}
+	return size, true, nil
+}
+
 // downloadDirectory downloads all objects under prefix to destDir in parallel, returns total bytes
 // and per-file skip/fetch counts for logging. When resumeDownload is true (download subcommand),
 // an existing local file with size > 0 is not re-downloaded; 0-byte files are re-fetched.
-func (m *Migrator) downloadDirectory(ctx context.Context, prefix string, objects []s3client.ObjectInfo, destDir string, resumeDownload bool) (totalBytes int64, filesSkipped int64, filesFetched int64, err error) {
+func (m *Migrator) downloadDirectory(ctx context.Context, src Source, objects []s3client.ObjectInfo, destDir string, resumeDownload bool) (totalBytes int64, filesSkipped int64, filesFetched int64, err error) {
 	concurrency := m.cfg.DownloadConcurrency
 	if concurrency < 1 {
 		concurrency = 10
@@ -340,7 +444,7 @@ func (m *Migrator) downloadDirectory(ctx context.Context, prefix string, objects
 				defer func() { <-sem }()
 			}
 
-			relKey := strings.TrimPrefix(obj.Key, m.cfg.SourceObjectPrefix())
+			relKey := trimSourcePrefix(obj.Key, src.Prefix)
 			localPath := filepath.Join(destDir, relKey)
 			if resumeDownload {
 				fi, err := os.Stat(localPath)
@@ -359,7 +463,7 @@ func (m *Migrator) downloadDirectory(ctx context.Context, prefix string, objects
 			}
 
 			slog.Debug("Downloading", "key", obj.Key)
-			if err := m.sourceClient.Download(gctx, obj.Key, localPath); err != nil {
+			if err := src.Client.Download(gctx, obj.Key, localPath); err != nil {
 				return fmt.Errorf("download %s: %w", obj.Key, err)
 			}
 			fetched.Add(1)
@@ -374,6 +478,35 @@ func (m *Migrator) downloadDirectory(ctx context.Context, prefix string, objects
 		return 0, 0, 0, err
 	}
 	return total, skipped.Load(), fetched.Load(), nil
+}
+
+func trimSourcePrefix(key, prefix string) string {
+	prefix = strings.TrimPrefix(strings.TrimSpace(prefix), "/")
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" {
+		return strings.TrimPrefix(key, "/")
+	}
+	if key == prefix {
+		return ""
+	}
+	return strings.TrimPrefix(strings.TrimPrefix(key, prefix+"/"), "/")
+}
+
+func directorySize(root string) (int64, error) {
+	var size int64
+	err := filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			size += info.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("measure directory %s: %w", root, err)
+	}
+	return size, nil
 }
 
 // BatchStats records per-batch compression and timing

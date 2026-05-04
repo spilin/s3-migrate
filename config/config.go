@@ -9,7 +9,8 @@ import (
 	"github.com/spf13/viper"
 )
 
-// SourceConfig selects where numbered directories are read from (exactly one of S3 or B2).
+// SourceConfig selects where numbered directories are read from.
+// When both B2 and AWS/S3 are configured, migration tries B2 first and then S3.
 type SourceConfig struct {
 	AWS *SourceAWS
 	B2  *SourceB2
@@ -107,6 +108,8 @@ type Config struct {
 	StateFile            string
 	StatsFile            string
 	ArchivePrefix        string
+	NeardataBaseURL      string
+	NeardataAPIKey       string
 	// FixGapsLog is optional JSONL path for fix-gaps (gap_found / gap_filled / gap_fill_failed lines).
 	FixGapsLog string
 	// ArchiveGapsLog is optional JSONL path for archive-gaps (archive_problem / archive_repaired / archive_repair_failed).
@@ -200,6 +203,8 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 		CompressionLevel:     v.GetInt("compression_level"),
 		ConsecutiveEmpty:     v.GetInt("consecutive_empty"),
 		ArchivePrefix:        v.GetString("archive_prefix"),
+		NeardataBaseURL:      firstString(v, "neardata.base_url", "neardata_base_url", "neardata-base"),
+		NeardataAPIKey:       firstString(v, "neardata.api_key", "neardata_api_key", "neardataAPIKey"),
 		FixGapsLog:           v.GetString("fix_gaps.log_file"),
 		ArchiveGapsLog:       v.GetString("archive_gaps.log_file"),
 	}
@@ -308,6 +313,15 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 	}
 
 	return cfg, nil
+}
+
+func firstString(v *viper.Viper, keys ...string) string {
+	for _, key := range keys {
+		if v.IsSet(key) {
+			return v.GetString(key)
+		}
+	}
+	return ""
 }
 
 func readNestedSourceDest(v *viper.Viper, cfg *Config) error {
@@ -430,24 +444,27 @@ func (c *Config) ArchiveCopyMaxBytesPerSecond() int64 {
 
 // mergeLegacyFlat maps old top-level s3/b2/r2/b2_source keys into nested source/destination when nested is absent.
 func mergeLegacyFlat(v *viper.Viper, cfg *Config) {
-	if cfg.Source.AWS == nil && cfg.Source.B2 == nil {
-		if v.GetString("b2_source.bucket") != "" {
-			cfg.Source.B2 = &SourceB2{
-				Bucket:      v.GetString("b2_source.bucket"),
-				Prefix:      v.GetString("s3.prefix"),
-				Region:      v.GetString("b2_source.region"),
-				AccessKeyID: v.GetString("b2_source.access_key_id"),
-				SecretKey:   v.GetString("b2_source.secret_key"),
-			}
-		} else if v.GetString("s3.bucket") != "" {
-			cfg.Source.AWS = &SourceAWS{
-				Bucket:      v.GetString("s3.bucket"),
-				Prefix:      v.GetString("s3.prefix"),
-				Region:      v.GetString("s3.region"),
-				Endpoint:    v.GetString("s3.endpoint"),
-				AccessKeyID: v.GetString("s3.access_key_id"),
-				SecretKey:   v.GetString("s3.secret_key"),
-			}
+	if cfg.Source.B2 == nil && v.GetString("b2_source.bucket") != "" {
+		prefix := v.GetString("b2_source.prefix")
+		if prefix == "" {
+			prefix = v.GetString("s3.prefix")
+		}
+		cfg.Source.B2 = &SourceB2{
+			Bucket:      v.GetString("b2_source.bucket"),
+			Prefix:      prefix,
+			Region:      v.GetString("b2_source.region"),
+			AccessKeyID: v.GetString("b2_source.access_key_id"),
+			SecretKey:   v.GetString("b2_source.secret_key"),
+		}
+	}
+	if cfg.Source.AWS == nil && v.GetString("s3.bucket") != "" {
+		cfg.Source.AWS = &SourceAWS{
+			Bucket:      v.GetString("s3.bucket"),
+			Prefix:      v.GetString("s3.prefix"),
+			Region:      v.GetString("s3.region"),
+			Endpoint:    v.GetString("s3.endpoint"),
+			AccessKeyID: v.GetString("s3.access_key_id"),
+			SecretKey:   v.GetString("s3.secret_key"),
 		}
 	}
 	if cfg.Destination.B2 == nil && cfg.Destination.R2 == nil && cfg.Destination.S3 == nil {
@@ -474,11 +491,8 @@ func validateSource(cfg *Config) error {
 	aws := cfg.Source.AWS != nil && cfg.Source.AWS.Bucket != ""
 	b2 := cfg.Source.B2 != nil && cfg.Source.B2.Bucket != "" &&
 		cfg.Source.B2.AccessKeyID != "" && cfg.Source.B2.SecretKey != ""
-	if aws && b2 {
-		return fmt.Errorf("source: specify only one of source.aws (or source.s3), or source.b2 (legacy: s3.* or b2_source.*)")
-	}
 	if !aws && !b2 {
-		return fmt.Errorf("source: set source.aws, source.s3, or source.b2 (legacy: s3.bucket or b2_source.*)")
+		return fmt.Errorf("source: set source.aws, source.s3, source.b2, or multiple sources (legacy: s3.bucket and/or b2_source.*)")
 	}
 	if cfg.Source.B2 != nil {
 		partial := cfg.Source.B2.Bucket != "" || cfg.Source.B2.AccessKeyID != "" || cfg.Source.B2.SecretKey != ""
