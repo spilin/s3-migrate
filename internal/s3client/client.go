@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	smithy "github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 type ObjectInfo struct {
@@ -35,15 +36,23 @@ func IsNotFoundError(err error) bool {
 		return false
 	}
 	var apiErr smithy.APIError
-	if !errors.As(err, &apiErr) {
-		return false
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "NotFound", "NoSuchKey", "NoSuchFile":
+			return true
+		}
 	}
-	switch apiErr.ErrorCode() {
-	case "NotFound", "NoSuchKey":
+
+	var respErr *smithyhttp.ResponseError
+	if errors.As(err, &respErr) && respErr.HTTPStatusCode() == 404 {
 		return true
-	default:
-		return false
 	}
+
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "status code: 404") ||
+		strings.Contains(msg, "404 not found") ||
+		strings.Contains(msg, "nosuchkey") ||
+		strings.Contains(msg, "nosuchfile")
 }
 
 // NewS3Client creates a client for AWS S3 (or compatible endpoint).
