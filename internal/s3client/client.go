@@ -29,6 +29,23 @@ type Client struct {
 	bucket string
 }
 
+// IsNotFoundError reports whether an S3-compatible API error means the object/prefix was absent.
+func IsNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.ErrorCode() {
+	case "NotFound", "NoSuchKey":
+		return true
+	default:
+		return false
+	}
+}
+
 // NewS3Client creates a client for AWS S3 (or compatible endpoint).
 // If accessKeyID and secretKey are both non-empty, static credentials are used; otherwise the default
 // credential chain applies (env, shared config/profile, IMDS, etc.).
@@ -153,11 +170,8 @@ func (c *Client) Exists(ctx context.Context, key string) (bool, error) {
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) {
-			if apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey" {
-				return false, nil
-			}
+		if IsNotFoundError(err) {
+			return false, nil
 		}
 		return false, fmt.Errorf("head object %s: %w", key, err)
 	}

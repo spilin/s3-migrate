@@ -237,12 +237,12 @@ func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
 						return nil
 					}
 
-					src, prefix, objects, err := m.findSourceObjects(gctx, n)
+					res, err := m.downloadHeightFromSources(gctx, n, batchDir, downloadOnly)
 					if err != nil {
 						return err
 					}
 
-					if len(objects) == 0 {
+					if !res.found {
 						dirSize, fetched, err := m.fillHeightFromNeardata(gctx, batchDir, n)
 						if err != nil {
 							return err
@@ -269,34 +269,30 @@ func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
 					}
 					consecutiveEmpty.Store(0)
 
-					dirSize, nSkip, nFetch, err := m.downloadDirectory(gctx, src, objects, batchDir, downloadOnly)
-					if err != nil {
-						return fmt.Errorf("download directory %s: %w", prefix, err)
-					}
-					total := batchSizeBytes.Add(dirSize)
+					total := batchSizeBytes.Add(res.dirSize)
 					dirs := dirsDownloaded.Add(1)
-					if downloadOnly && nFetch == 0 && nSkip > 0 {
+					if downloadOnly && res.filesFetched == 0 && res.filesSkipped > 0 {
 						slog.Info("Skipped directory (already on disk)",
-							"dir", prefix,
-							"source", src.Name,
-							"files_skipped", nSkip,
-							"dir_size_mb", dirSize/(1024*1024),
+							"dir", res.prefix,
+							"source", res.source.Name,
+							"files_skipped", res.filesSkipped,
+							"dir_size_mb", res.dirSize/(1024*1024),
 							"batch_size_mb", total/(1024*1024),
 							"dirs", dirs)
-					} else if downloadOnly && nSkip > 0 {
+					} else if downloadOnly && res.filesSkipped > 0 {
 						slog.Info("Downloaded directory",
-							"dir", prefix,
-							"source", src.Name,
-							"files_fetched", nFetch,
-							"files_skipped", nSkip,
-							"dir_size_mb", dirSize/(1024*1024),
+							"dir", res.prefix,
+							"source", res.source.Name,
+							"files_fetched", res.filesFetched,
+							"files_skipped", res.filesSkipped,
+							"dir_size_mb", res.dirSize/(1024*1024),
 							"batch_size_mb", total/(1024*1024),
 							"dirs", dirs)
 					} else {
 						slog.Info("Downloaded directory",
-							"dir", prefix,
-							"source", src.Name,
-							"dir_size_mb", dirSize/(1024*1024),
+							"dir", res.prefix,
+							"source", res.source.Name,
+							"dir_size_mb", res.dirSize/(1024*1024),
 							"batch_size_mb", total/(1024*1024),
 							"dirs", dirs)
 					}
@@ -381,20 +377,54 @@ func hasContent(dir string) (bool, error) {
 	return len(entries) > 0, nil
 }
 
-func (m *Migrator) findSourceObjects(ctx context.Context, height int64) (Source, string, []s3client.ObjectInfo, error) {
-	var zero Source
+type sourceDownloadResult struct {
+	source       Source
+	prefix       string
+	dirSize      int64
+	filesSkipped int64
+	filesFetched int64
+	found        bool
+}
+
+func (m *Migrator) downloadHeightFromSources(ctx context.Context, height int64, batchDir string, resumeDownload bool) (sourceDownloadResult, error) {
 	for _, src := range m.sources {
 		prefix := dirPrefix(src.Prefix, m.cfg.PadWidth, height)
 		objects, err := src.Client.ListObjects(ctx, prefix)
 		if err != nil {
-			return zero, "", nil, fmt.Errorf("list objects from %s under %s: %w", src.Name, prefix, err)
+			if s3client.IsNotFoundError(err) {
+				slog.Info("Source directory missing, trying next source", "source", src.Name, "height", height, "prefix", prefix)
+				continue
+			}
+			return sourceDownloadResult{}, fmt.Errorf("list objects from %s under %s: %w", src.Name, prefix, err)
 		}
-		if len(objects) > 0 {
-			return src, prefix, objects, nil
+		if len(objects) == 0 {
+			slog.Debug("Source has no directory", "source", src.Name, "height", height, "prefix", prefix)
+			continue
 		}
-		slog.Debug("Source has no directory", "source", src.Name, "height", height, "prefix", prefix)
+
+		dirSize, filesSkipped, filesFetched, err := m.downloadDirectory(ctx, src, objects, batchDir, resumeDownload)
+		if err != nil {
+			if s3client.IsNotFoundError(err) {
+				slog.Info("Source object missing during download, trying next source",
+					"source", src.Name, "height", height, "prefix", prefix, "err", err)
+				if rmErr := os.RemoveAll(filepath.Join(batchDir, fmt.Sprintf("%0*d", m.cfg.PadWidth, height))); rmErr != nil {
+					slog.Warn("Failed to remove partial height directory", "height", height, "err", rmErr)
+				}
+				continue
+			}
+			return sourceDownloadResult{}, fmt.Errorf("download directory %s from %s: %w", prefix, src.Name, err)
+		}
+
+		return sourceDownloadResult{
+			source:       src,
+			prefix:       prefix,
+			dirSize:      dirSize,
+			filesSkipped: filesSkipped,
+			filesFetched: filesFetched,
+			found:        true,
+		}, nil
 	}
-	return zero, "", nil, nil
+	return sourceDownloadResult{}, nil
 }
 
 func (m *Migrator) fillHeightFromNeardata(ctx context.Context, batchDir string, height int64) (int64, bool, error) {
