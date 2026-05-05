@@ -36,6 +36,13 @@ type Source struct {
 type Options struct {
 	NeardataBaseURL string
 	NeardataAPIKey  string
+	RefreshStopAt   func(context.Context) (StopAtRefresh, error)
+}
+
+// StopAtRefresh is the latest chain height plus the rounded migration boundary.
+type StopAtRefresh struct {
+	LatestBlockHeight int64
+	StopAt            int64
 }
 
 type Migrator struct {
@@ -172,6 +179,12 @@ func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
 		}
 
 		if m.cfg.StopAt > 0 && batchStart > m.cfg.StopAt {
+			if m.opts.RefreshStopAt != nil {
+				if err := m.waitForNextStopAt(ctx, batchStart); err != nil {
+					return err
+				}
+				continue
+			}
 			slog.Info("Reached stop_at")
 			return nil
 		}
@@ -366,6 +379,51 @@ func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
 			return nil
 		}
 		batchStart = batchEnd + 1
+	}
+}
+
+func (m *Migrator) waitForNextStopAt(ctx context.Context, batchStart int64) error {
+	sleep := time.Duration(m.cfg.StopAtRefreshMinutes) * time.Minute
+	if sleep <= 0 {
+		sleep = 5 * time.Minute
+	}
+
+	for {
+		slog.Info("Reached dynamic stop_at, sleeping before refresh",
+			"next_batch_start", batchStart,
+			"current_stop_at", m.cfg.StopAt,
+			"sleep_minutes", int(sleep/time.Minute))
+
+		timer := time.NewTimer(sleep)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+
+		refreshed, err := m.opts.RefreshStopAt(ctx)
+		if err != nil {
+			return err
+		}
+		if refreshed.StopAt > m.cfg.StopAt {
+			slog.Info("Refreshed dynamic stop_at",
+				"old_stop_at", m.cfg.StopAt,
+				"latest_block_height", refreshed.LatestBlockHeight,
+				"new_stop_at", refreshed.StopAt,
+				"next_batch_start", batchStart)
+			m.cfg.StopAt = refreshed.StopAt
+		} else {
+			slog.Info("Dynamic stop_at unchanged",
+				"latest_block_height", refreshed.LatestBlockHeight,
+				"stop_at", m.cfg.StopAt,
+				"refreshed_stop_at", refreshed.StopAt,
+				"next_batch_start", batchStart)
+		}
+
+		if batchStart <= m.cfg.StopAt {
+			return nil
+		}
 	}
 }
 

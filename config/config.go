@@ -97,6 +97,7 @@ type Config struct {
 
 	StartFrom            int64
 	StopAt               int64
+	StopAtRefreshMinutes int
 	PadWidth             int
 	DownloadConcurrency  int
 	DirectoryConcurrency int
@@ -110,6 +111,7 @@ type Config struct {
 	ArchivePrefix        string
 	NeardataBaseURL      string
 	NeardataAPIKey       string
+	NearRPCURL           string
 	// FixGapsLog is optional JSONL path for fix-gaps (gap_found / gap_filled / gap_fill_failed lines).
 	FixGapsLog string
 	// ArchiveGapsLog is optional JSONL path for archive-gaps (archive_problem / archive_repaired / archive_repair_failed).
@@ -195,6 +197,7 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 		StatsFile:            v.GetString("stats_file"),
 		StartFrom:            v.GetInt64("start_from"),
 		StopAt:               v.GetInt64("stop_at"),
+		StopAtRefreshMinutes: v.GetInt("stop_at_refresh_minutes"),
 		PadWidth:             v.GetInt("pad_width"),
 		DownloadConcurrency:  v.GetInt("download_concurrency"),
 		DirectoryConcurrency: v.GetInt("directory_concurrency"),
@@ -205,6 +208,7 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 		ArchivePrefix:        v.GetString("archive_prefix"),
 		NeardataBaseURL:      firstString(v, "neardata.base_url", "neardata_base_url", "neardata-base"),
 		NeardataAPIKey:       firstString(v, "neardata.api_key", "neardata_api_key", "neardataAPIKey"),
+		NearRPCURL:           firstString(v, "near.rpc_url", "near_rpc_url"),
 		FixGapsLog:           v.GetString("fix_gaps.log_file"),
 		ArchiveGapsLog:       v.GetString("archive_gaps.log_file"),
 	}
@@ -240,6 +244,9 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 	if cfg.BatchDirs <= 0 {
 		cfg.BatchDirs = 1000000
 	}
+	if cfg.StopAtRefreshMinutes <= 0 {
+		cfg.StopAtRefreshMinutes = 5
+	}
 	cfg.Compression = strings.ToLower(cfg.Compression)
 	if cfg.Compression == "" {
 		cfg.Compression = "gzip"
@@ -260,6 +267,9 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 		cfg.ArchivePrefix = "archives"
 	}
 	cfg.ArchivePrefix = strings.TrimSuffix(cfg.ArchivePrefix, "/")
+	if cfg.NearRPCURL == "" {
+		cfg.NearRPCURL = "https://rpc.mainnet.fastnear.com"
+	}
 
 	// Validation
 	if requireSource {

@@ -88,7 +88,8 @@ destination:
 
 # Migration settings — iterate by number; no S3 list of prefixes
 start_from: 9820210 # directory number to start (e.g. 9820210 -> 000009820210)
-stop_at: 0 # optional max number (0 = no limit)
+stop_at: 0 # 0 = dynamic: resolve latest NEAR block from near.rpc_url, rounded down to batch_dirs
+stop_at_refresh_minutes: 5 # dynamic stop_at only: sleep this long, then refresh and continue when caught up
 pad_width: 12 # zero-pad width for directory names (000009820210)
 download_concurrency: 5 # parallel file downloads per directory (lower if hitting S3 503 SlowDown)
 directory_concurrency: 10 # parallel directory processing (lower if hitting S3 rate limits)
@@ -100,3 +101,6 @@ archive_prefix: archives # destination prefix for archives (default: archives)
 work_dir: . # relative to cwd (default: current dir for batches)
 state_file: state.json # relative to cwd (default: ./state.json)
 stats_file: stats.jsonl # JSONL: migrate batch stats; validate-ranges appends a line with missing ranges on failure; empty = disabled
+
+near:
+  rpc_url: https://rpc.mainnet.fastnear.com

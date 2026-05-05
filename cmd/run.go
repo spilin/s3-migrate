@@ -35,6 +35,30 @@ func runCmd() *cobra.Command {
 			}()
 
 			cfg := loadedConfig
+			dynamicStopAt := cfg.StopAt <= 0
+			refreshStopAt := func(ctx context.Context) (migrator.StopAtRefresh, error) {
+				latestHeight, err := latestNearBlockHeight(ctx, cfg.NearRPCURL)
+				if err != nil {
+					return migrator.StopAtRefresh{}, err
+				}
+				return migrator.StopAtRefresh{
+					LatestBlockHeight: latestHeight,
+					StopAt:            roundedStopAt(latestHeight, cfg.BatchDirs),
+				}, nil
+			}
+			if dynamicStopAt {
+				refreshed, err := refreshStopAt(ctx)
+				if err != nil {
+					return err
+				}
+				cfg.StopAt = refreshed.StopAt
+				slog.Info("Resolved dynamic stop_at from NEAR RPC",
+					"near_rpc_url", cfg.NearRPCURL,
+					"latest_block_height", refreshed.LatestBlockHeight,
+					"batch_dirs", cfg.BatchDirs,
+					"stop_at", cfg.StopAt,
+					"refresh_minutes", cfg.StopAtRefreshMinutes)
+			}
 
 			sources, err := newMigrationSources(ctx, cfg)
 			if err != nil {
@@ -54,10 +78,14 @@ func runCmd() *cobra.Command {
 				slog.Info("Using S3-compatible destination (e.g. MinIO)", "endpoint", cfg.Destination.S3.Endpoint, "bucket", cfg.Destination.S3.Bucket)
 			}
 
-			m, err := migrator.NewWithSources(cfg, sources, destClient, migrator.Options{
+			opts := migrator.Options{
 				NeardataBaseURL: effectiveNeardataBaseURL(cmd, neardataBase, cfg),
 				NeardataAPIKey:  effectiveNeardataAPIKey(cmd, neardataAPIKey, cfg),
-			})
+			}
+			if dynamicStopAt {
+				opts.RefreshStopAt = refreshStopAt
+			}
+			m, err := migrator.NewWithSources(cfg, sources, destClient, opts)
 			if err != nil {
 				return err
 			}
