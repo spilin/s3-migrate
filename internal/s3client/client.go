@@ -55,6 +55,29 @@ func IsNotFoundError(err error) bool {
 		strings.Contains(msg, "nosuchfile")
 }
 
+// IsFallbackableSourceError reports source-level errors where migration can try
+// the next configured source instead of aborting immediately.
+func IsFallbackableSourceError(err error) bool {
+	if IsNotFoundError(err) {
+		return true
+	}
+
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "PermanentRedirect" {
+		return true
+	}
+
+	var respErr *smithyhttp.ResponseError
+	if errors.As(err, &respErr) && respErr.HTTPStatusCode() == 301 {
+		return true
+	}
+
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "permanentredirect") ||
+		strings.Contains(msg, "statuscode: 301") ||
+		strings.Contains(msg, "status code: 301")
+}
+
 // NewS3Client creates a client for AWS S3 (or compatible endpoint).
 // If accessKeyID and secretKey are both non-empty, static credentials are used; otherwise the default
 // credential chain applies (env, shared config/profile, IMDS, etc.).

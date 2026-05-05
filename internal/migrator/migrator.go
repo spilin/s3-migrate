@@ -391,8 +391,9 @@ func (m *Migrator) downloadHeightFromSources(ctx context.Context, height int64, 
 		prefix := dirPrefix(src.Prefix, m.cfg.PadWidth, height)
 		objects, err := src.Client.ListObjects(ctx, prefix)
 		if err != nil {
-			if s3client.IsNotFoundError(err) {
-				slog.Info("Source directory missing, trying next source", "source", src.Name, "height", height, "prefix", prefix)
+			if s3client.IsFallbackableSourceError(err) {
+				slog.Info("Source unavailable or missing, trying next source",
+					"source", src.Name, "height", height, "prefix", prefix, "err", err)
 				continue
 			}
 			return sourceDownloadResult{}, fmt.Errorf("list objects from %s under %s: %w", src.Name, prefix, err)
@@ -404,8 +405,8 @@ func (m *Migrator) downloadHeightFromSources(ctx context.Context, height int64, 
 
 		dirSize, filesSkipped, filesFetched, err := m.downloadDirectory(ctx, src, objects, batchDir, resumeDownload)
 		if err != nil {
-			if s3client.IsNotFoundError(err) {
-				slog.Info("Source object missing during download, trying next source",
+			if s3client.IsFallbackableSourceError(err) {
+				slog.Info("Source object unavailable or missing during download, trying next source",
 					"source", src.Name, "height", height, "prefix", prefix, "err", err)
 				if rmErr := os.RemoveAll(filepath.Join(batchDir, fmt.Sprintf("%0*d", m.cfg.PadWidth, height))); rmErr != nil {
 					slog.Warn("Failed to remove partial height directory", "height", height, "err", rmErr)
