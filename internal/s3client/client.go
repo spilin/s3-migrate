@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithy "github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
@@ -301,6 +302,36 @@ func (c *Client) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, 
 		return nil
 	})
 	return objects, err
+}
+
+// DeleteObjects deletes object keys from the bucket. The caller is responsible
+// for passing at most the S3 API maximum of 1000 keys per call.
+func (c *Client) DeleteObjects(ctx context.Context, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	objects := make([]types.ObjectIdentifier, 0, len(keys))
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		objects = append(objects, types.ObjectIdentifier{Key: aws.String(key)})
+	}
+	if len(objects) == 0 {
+		return nil
+	}
+
+	_, err := c.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		Bucket: aws.String(c.bucket),
+		Delete: &types.Delete{
+			Objects: objects,
+			Quiet:   aws.Bool(true),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("delete %d objects: %w", len(objects), err)
+	}
+	return nil
 }
 
 // isRetryableS3Error returns true for 503 SlowDown, 500, 502, etc.

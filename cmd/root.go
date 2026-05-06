@@ -48,6 +48,7 @@ func RootCmd() *cobra.Command {
 		fixGapsCmd(),
 		archiveGapsCmd(),
 		existsCmd(),
+		emptyBucketCmd(),
 		validateRangesCmd(),
 	)
 
