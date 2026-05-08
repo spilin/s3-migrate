@@ -90,6 +90,7 @@ destination:
 start_from: 9820210 # directory number to start (e.g. 9820210 -> 000009820210)
 stop_at: 0 # 0 = dynamic: resolve latest NEAR block from near.rpc_url, rounded down to batch_dirs
 stop_at_refresh_minutes: 5 # dynamic stop_at only: sleep this long, then refresh and continue when caught up
+hot_window_blocks: 10000 # dynamic stop_at only: archive only blocks at least this far behind latest
 pad_width: 12 # zero-pad width for directory names (000009820210)
 download_concurrency: 5 # parallel file downloads per directory (lower if hitting S3 503 SlowDown)
 directory_concurrency: 10 # parallel directory processing (lower if hitting S3 rate limits)

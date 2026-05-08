@@ -42,6 +42,7 @@ type Options struct {
 // StopAtRefresh is the latest chain height plus the rounded migration boundary.
 type StopAtRefresh struct {
 	LatestBlockHeight int64
+	SafeBlockHeight   int64
 	StopAt            int64
 }
 
@@ -410,12 +411,14 @@ func (m *Migrator) waitForNextStopAt(ctx context.Context, batchStart int64) erro
 			slog.Info("Refreshed dynamic stop_at",
 				"old_stop_at", m.cfg.StopAt,
 				"latest_block_height", refreshed.LatestBlockHeight,
+				"safe_block_height", refreshed.SafeBlockHeight,
 				"new_stop_at", refreshed.StopAt,
 				"next_batch_start", batchStart)
 			m.cfg.StopAt = refreshed.StopAt
 		} else {
 			slog.Info("Dynamic stop_at unchanged",
 				"latest_block_height", refreshed.LatestBlockHeight,
+				"safe_block_height", refreshed.SafeBlockHeight,
 				"stop_at", m.cfg.StopAt,
 				"refreshed_stop_at", refreshed.StopAt,
 				"next_batch_start", batchStart)

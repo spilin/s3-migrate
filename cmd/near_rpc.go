@@ -54,7 +54,13 @@ func latestNearBlockHeight(ctx context.Context, rpcURL string) (int64, error) {
 	return out.Result.SyncInfo.LatestBlockHeight, nil
 }
 
-func roundedStopAt(latestHeight, batchDirs int64) int64 {
+func roundedStopAt(latestHeight, batchDirs, hotWindowBlocks int64) int64 {
+	if hotWindowBlocks > 0 {
+		latestHeight -= hotWindowBlocks
+	}
+	if latestHeight < 0 {
+		latestHeight = 0
+	}
 	if batchDirs <= 0 {
 		return latestHeight
 	}

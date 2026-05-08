@@ -41,9 +41,14 @@ func runCmd() *cobra.Command {
 				if err != nil {
 					return migrator.StopAtRefresh{}, err
 				}
+				safeHeight := latestHeight - cfg.HotWindowBlocks
+				if safeHeight < 0 {
+					safeHeight = 0
+				}
 				return migrator.StopAtRefresh{
 					LatestBlockHeight: latestHeight,
-					StopAt:            roundedStopAt(latestHeight, cfg.BatchDirs),
+					SafeBlockHeight:   safeHeight,
+					StopAt:            roundedStopAt(latestHeight, cfg.BatchDirs, cfg.HotWindowBlocks),
 				}, nil
 			}
 			if dynamicStopAt {
@@ -55,6 +60,8 @@ func runCmd() *cobra.Command {
 				slog.Info("Resolved dynamic stop_at from NEAR RPC",
 					"near_rpc_url", cfg.NearRPCURL,
 					"latest_block_height", refreshed.LatestBlockHeight,
+					"hot_window_blocks", cfg.HotWindowBlocks,
+					"safe_block_height", refreshed.SafeBlockHeight,
 					"batch_dirs", cfg.BatchDirs,
 					"stop_at", cfg.StopAt,
 					"refresh_minutes", cfg.StopAtRefreshMinutes)

@@ -98,6 +98,7 @@ type Config struct {
 	StartFrom            int64
 	StopAt               int64
 	StopAtRefreshMinutes int
+	HotWindowBlocks      int64
 	PadWidth             int
 	DownloadConcurrency  int
 	DirectoryConcurrency int
@@ -198,6 +199,7 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 		StartFrom:            v.GetInt64("start_from"),
 		StopAt:               v.GetInt64("stop_at"),
 		StopAtRefreshMinutes: v.GetInt("stop_at_refresh_minutes"),
+		HotWindowBlocks:      v.GetInt64("hot_window_blocks"),
 		PadWidth:             v.GetInt("pad_width"),
 		DownloadConcurrency:  v.GetInt("download_concurrency"),
 		DirectoryConcurrency: v.GetInt("directory_concurrency"),
@@ -246,6 +248,9 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 	}
 	if cfg.StopAtRefreshMinutes <= 0 {
 		cfg.StopAtRefreshMinutes = 5
+	}
+	if cfg.HotWindowBlocks < 0 {
+		return nil, fmt.Errorf("hot_window_blocks must be >= 0")
 	}
 	cfg.Compression = strings.ToLower(cfg.Compression)
 	if cfg.Compression == "" {
