@@ -83,6 +83,16 @@ type ArchiveCopyConfig struct {
 	MaxMegabitsPerSecond float64
 }
 
+// CleanupConfig controls optional source block cleanup that runs alongside migrate run.
+type CleanupConfig struct {
+	Enabled         bool
+	HotWindowBlocks int64
+	IntervalMinutes int
+	StartFrom       int64
+	StateFile       string
+	DryRun          bool
+}
+
 // Config holds migration settings and nested source/destination.
 type Config struct {
 	Source      SourceConfig
@@ -94,6 +104,8 @@ type Config struct {
 
 	// ArchiveCopy is optional; required for copy-archives subcommand.
 	ArchiveCopy *ArchiveCopyConfig
+	// Cleanup is optional and is only used by the run subcommand.
+	Cleanup CleanupConfig
 
 	StartFrom            int64
 	StopAt               int64
@@ -213,6 +225,14 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 		NearRPCURL:           firstString(v, "near.rpc_url", "near_rpc_url"),
 		FixGapsLog:           v.GetString("fix_gaps.log_file"),
 		ArchiveGapsLog:       v.GetString("archive_gaps.log_file"),
+		Cleanup: CleanupConfig{
+			Enabled:         v.GetBool("cleanup.enabled"),
+			HotWindowBlocks: v.GetInt64("cleanup.hot_window_blocks"),
+			IntervalMinutes: v.GetInt("cleanup.interval_minutes"),
+			StartFrom:       v.GetInt64("cleanup.start_from"),
+			StateFile:       v.GetString("cleanup.state_file"),
+			DryRun:          v.GetBool("cleanup.dry_run"),
+		},
 	}
 
 	if err := readNestedSourceDest(v, cfg); err != nil {
@@ -251,6 +271,18 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 	}
 	if cfg.HotWindowBlocks < 0 {
 		return nil, fmt.Errorf("hot_window_blocks must be >= 0")
+	}
+	if cfg.Cleanup.HotWindowBlocks < 0 {
+		return nil, fmt.Errorf("cleanup.hot_window_blocks must be >= 0")
+	}
+	if cfg.Cleanup.IntervalMinutes <= 0 {
+		cfg.Cleanup.IntervalMinutes = cfg.StopAtRefreshMinutes
+	}
+	if cfg.Cleanup.StartFrom <= 0 {
+		cfg.Cleanup.StartFrom = cfg.StartFrom
+	}
+	if cfg.Cleanup.StateFile == "" {
+		cfg.Cleanup.StateFile = "cleanup_state.json"
 	}
 	cfg.Compression = strings.ToLower(cfg.Compression)
 	if cfg.Compression == "" {
@@ -311,6 +343,13 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 			return nil, fmt.Errorf("resolve stats_file: %w", err)
 		}
 		cfg.StatsFile = abs
+	}
+	if cfg.Cleanup.StateFile != "" && !filepath.IsAbs(cfg.Cleanup.StateFile) {
+		abs, err := filepath.Abs(cfg.Cleanup.StateFile)
+		if err != nil {
+			return nil, fmt.Errorf("resolve cleanup.state_file: %w", err)
+		}
+		cfg.Cleanup.StateFile = abs
 	}
 	if cfg.FixGapsLog != "" && !filepath.IsAbs(cfg.FixGapsLog) {
 		abs, err := filepath.Abs(cfg.FixGapsLog)

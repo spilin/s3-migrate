@@ -11,6 +11,7 @@ A Go application that runs on EC2 to migrate data from **AWS S3** or **Backblaze
 5. **Verifies** the archive (zstd -t / gzip -t style) before upload
 6. **Uploads** the archive to R2 or B2 (under `archives/` prefix)
 7. **Persists** progress in a state file for resume on restart
+8. Optionally runs source cleanup in the same `run` process after archived batches are safely outside a separate cleanup hot window
 
 ## Configuration
 
@@ -60,6 +61,7 @@ Or set `S3MIGRATE_CONFIG=/path/to/config.yaml`.
 | `work_dir` | Local temp directory for downloads |
 | `state_file` | Path to store last processed number for resume |
 | `stats_file` | JSONL: migrate batch stats; `download` appends lines with `kind: download_batch`; `validate-ranges` appends `kind: validate_ranges_missing` when batches are missing |
+| `cleanup.*` | Optional same-process cleanup for `run`: `enabled`, separate `hot_window_blocks`, `interval_minutes`, `start_from`, `state_file`, `dry_run` |
 
 ## Environment variables
 
@@ -68,6 +70,14 @@ All settings can be overridden via env vars with `S3MIGRATE_` prefix.
 **Logging:** `S3MIGRATE_LOG_LEVEL=debug` enables verbose output (per-file downloads, skipped dirs).
 
 **S3 503 SlowDown:** Downloads automatically retry with exponential backoff (1s, 2s, 4s… up to 30s). If you still hit rate limits, lower `directory_concurrency` and `download_concurrency`.
+
+## Same-process source cleanup
+
+`run` can start a background cleanup routine by setting `cleanup.enabled: true`. Cleanup has its own `cleanup.hot_window_blocks`, so you can archive with a smaller hot window while keeping source block directories (`block.json` plus `shard_*.json`) for longer before deleting them.
+
+Cleanup advances through the same batch ranges as archive creation. For each batch it checks that the matching destination archive exists, checks that the batch is older than `latest NEAR height - cleanup.hot_window_blocks`, then deletes the padded source block prefixes from the configured source bucket(s). Progress is stored in `cleanup.state_file`, independent from `state_file`.
+
+Start with `cleanup.dry_run: true` to count eligible objects without deleting them.
 
 ## Docker
 

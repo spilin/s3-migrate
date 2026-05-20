@@ -97,7 +97,24 @@ func runCmd() *cobra.Command {
 				return err
 			}
 
-			if err := m.Run(ctx); err != nil && err != context.Canceled {
+			cleanupCtx, cleanupCancel := context.WithCancel(ctx)
+			cleanupDone := make(chan error, 1)
+			if cfg.Cleanup.Enabled {
+				go func() {
+					cleanupDone <- m.RunCleanupLoop(cleanupCtx, func(ctx context.Context) (int64, error) {
+						return latestNearBlockHeight(ctx, cfg.NearRPCURL)
+					})
+				}()
+			}
+
+			err = m.Run(ctx)
+			cleanupCancel()
+			if cfg.Cleanup.Enabled {
+				if cleanupErr := <-cleanupDone; cleanupErr != nil && cleanupErr != context.Canceled {
+					slog.Warn("Source cleanup stopped", "err", cleanupErr)
+				}
+			}
+			if err != nil && err != context.Canceled {
 				return err
 			}
 			slog.Info("Migration completed")

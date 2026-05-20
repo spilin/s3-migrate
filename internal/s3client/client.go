@@ -334,6 +334,50 @@ func (c *Client) DeleteObjects(ctx context.Context, keys []string) error {
 	return nil
 }
 
+// DeleteObjectsWithPrefix deletes every object under prefix and returns the number
+// of matching objects. When dryRun is true, it only counts objects.
+func (c *Client) DeleteObjectsWithPrefix(ctx context.Context, prefix string, dryRun bool) (int64, error) {
+	paginator := s3.NewListObjectsV2Paginator(c.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(c.bucket),
+		Prefix: aws.String(prefix),
+	})
+
+	var total int64
+	for paginator.HasMorePages() {
+		out, err := paginator.NextPage(ctx)
+		if err != nil {
+			return total, fmt.Errorf("list objects for delete prefix %s: %w", prefix, err)
+		}
+		if len(out.Contents) == 0 {
+			continue
+		}
+
+		objects := make([]types.ObjectIdentifier, 0, len(out.Contents))
+		for _, obj := range out.Contents {
+			if obj.Key == nil || *obj.Key == "" {
+				continue
+			}
+			total++
+			objects = append(objects, types.ObjectIdentifier{Key: obj.Key})
+		}
+		if dryRun || len(objects) == 0 {
+			continue
+		}
+
+		_, err = c.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(c.bucket),
+			Delete: &types.Delete{
+				Objects: objects,
+				Quiet:   aws.Bool(true),
+			},
+		})
+		if err != nil {
+			return total, fmt.Errorf("delete prefix %s objects: %w", prefix, err)
+		}
+	}
+	return total, nil
+}
+
 // isRetryableS3Error returns true for 503 SlowDown, 500, 502, etc.
 func isRetryableS3Error(err error) bool {
 	if err == nil {

@@ -9,6 +9,9 @@
 # Subcommand `download` uses source + work_dir + state_file only (no destination required).
 # Batches are stored under work_dir/batch_<first>_<last>/ (inclusive directory index range).
 #
+# Subcommand `run` can optionally run source cleanup in the same process. Cleanup uses its own
+# hot window and state file, and only deletes source block directories after the matching archive exists.
+#
 # Source: exactly one of source.aws, source.s3, or source.b2 (reads numbered dirs from S3-compatible storage).
 # source.aws and source.s3 are the same S3 read API and the same fields; use source.s3 if you also use
 # destination.s3 (symmetric naming). Do not set both source.aws and source.s3 in one file.
@@ -85,6 +88,15 @@ destination:
 #   copy_all_under_prefix: false
 #   max_bytes_per_second: 12500000 # optional total cap (~100 Mbit/s) shared across all concurrent copies
 #   # max_megabits_per_second: 100 # alternative to max_bytes_per_second when the latter is 0
+
+# Optional source block cleanup for `run`.
+# cleanup:
+#   enabled: false
+#   hot_window_blocks: 100000 # separate from hot_window_blocks; use a larger value to keep source blocks longer
+#   interval_minutes: 5 # how often to look for newly cleanup-eligible archived batches
+#   start_from: 9820210 # optional; defaults to top-level start_from
+#   state_file: cleanup_state.json # independent from state_file
+#   dry_run: true # count eligible source objects without deleting
 
 # Migration settings — iterate by number; no S3 list of prefixes
 start_from: 9820210 # directory number to start (e.g. 9820210 -> 000009820210)
