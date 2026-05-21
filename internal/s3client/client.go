@@ -381,7 +381,7 @@ func (c *Client) DeleteObjectsWithPrefix(ctx context.Context, prefix string, dry
 			return total, fmt.Errorf("delete prefix %s objects: %w", prefix, err)
 		}
 	}
-	if !dryRun {
+	if !dryRun && total > 0 {
 		empty, err := c.prefixEmpty(ctx, prefix)
 		if err != nil {
 			return total, err
