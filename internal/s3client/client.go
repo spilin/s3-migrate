@@ -321,7 +321,7 @@ func (c *Client) DeleteObjects(ctx context.Context, keys []string) error {
 		return nil
 	}
 
-	_, err := c.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+	out, err := c.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 		Bucket: aws.String(c.bucket),
 		Delete: &types.Delete{
 			Objects: objects,
@@ -329,6 +329,9 @@ func (c *Client) DeleteObjects(ctx context.Context, keys []string) error {
 		},
 	})
 	if err != nil {
+		return fmt.Errorf("delete %d objects: %w", len(objects), err)
+	}
+	if err := deleteObjectsErrors(out.Errors); err != nil {
 		return fmt.Errorf("delete %d objects: %w", len(objects), err)
 	}
 	return nil
@@ -364,7 +367,7 @@ func (c *Client) DeleteObjectsWithPrefix(ctx context.Context, prefix string, dry
 			continue
 		}
 
-		_, err = c.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		deleteOut, err := c.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 			Bucket: aws.String(c.bucket),
 			Delete: &types.Delete{
 				Objects: objects,
@@ -374,8 +377,54 @@ func (c *Client) DeleteObjectsWithPrefix(ctx context.Context, prefix string, dry
 		if err != nil {
 			return total, fmt.Errorf("delete prefix %s objects: %w", prefix, err)
 		}
+		if err := deleteObjectsErrors(deleteOut.Errors); err != nil {
+			return total, fmt.Errorf("delete prefix %s objects: %w", prefix, err)
+		}
+	}
+	if !dryRun {
+		empty, err := c.prefixEmpty(ctx, prefix)
+		if err != nil {
+			return total, err
+		}
+		if !empty {
+			return total, fmt.Errorf("delete prefix %s incomplete: objects still remain", prefix)
+		}
 	}
 	return total, nil
+}
+
+func (c *Client) prefixEmpty(ctx context.Context, prefix string) (bool, error) {
+	out, err := c.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:  aws.String(c.bucket),
+		Prefix:  aws.String(prefix),
+		MaxKeys: aws.Int32(1),
+	})
+	if err != nil {
+		return false, fmt.Errorf("verify prefix %s empty: %w", prefix, err)
+	}
+	return len(out.Contents) == 0, nil
+}
+
+func deleteObjectsErrors(errors []types.Error) error {
+	if len(errors) == 0 {
+		return nil
+	}
+
+	const maxReported = 5
+	parts := make([]string, 0, min(len(errors), maxReported))
+	for i, deleteErr := range errors {
+		if i >= maxReported {
+			break
+		}
+		key := aws.ToString(deleteErr.Key)
+		code := aws.ToString(deleteErr.Code)
+		message := aws.ToString(deleteErr.Message)
+		parts = append(parts, fmt.Sprintf("%s:%s:%s", key, code, message))
+	}
+	if len(errors) > maxReported {
+		parts = append(parts, fmt.Sprintf("... and %d more", len(errors)-maxReported))
+	}
+	return fmt.Errorf("S3 delete returned %d object errors: %s", len(errors), strings.Join(parts, "; "))
 }
 
 // isRetryableS3Error returns true for 503 SlowDown, 500, 502, etc.
