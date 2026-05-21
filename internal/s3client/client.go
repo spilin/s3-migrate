@@ -412,19 +412,29 @@ func deleteObjectsErrors(errors []types.Error) error {
 
 	const maxReported = 5
 	parts := make([]string, 0, min(len(errors), maxReported))
-	for i, deleteErr := range errors {
-		if i >= maxReported {
+	reported := 0
+	for _, deleteErr := range errors {
+		if isIgnoredDeleteObjectError(deleteErr) {
+			continue
+		}
+		if reported >= maxReported {
 			break
 		}
 		key := aws.ToString(deleteErr.Key)
 		code := aws.ToString(deleteErr.Code)
 		message := aws.ToString(deleteErr.Message)
 		parts = append(parts, fmt.Sprintf("%s:%s:%s", key, code, message))
+		reported++
 	}
-	if len(errors) > maxReported {
-		parts = append(parts, fmt.Sprintf("... and %d more", len(errors)-maxReported))
+	if len(parts) == 0 {
+		return nil
 	}
 	return fmt.Errorf("S3 delete returned %d object errors: %s", len(errors), strings.Join(parts, "; "))
+}
+
+func isIgnoredDeleteObjectError(deleteErr types.Error) bool {
+	code := strings.ToLower(aws.ToString(deleteErr.Code))
+	return code == "nosuchkey" || code == "notfound" || code == "nosuchfile"
 }
 
 // isRetryableS3Error returns true for 503 SlowDown, 500, 502, etc.
@@ -432,10 +442,19 @@ func isRetryableS3Error(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := err.Error()
-	return strings.Contains(s, "SlowDown") || strings.Contains(s, "503") ||
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "slowdown") || strings.Contains(s, "503") ||
 		strings.Contains(s, "500") || strings.Contains(s, "502") ||
-		strings.Contains(s, "ServiceUnavailable") || strings.Contains(s, "InternalError")
+		strings.Contains(s, "serviceunavailable") || strings.Contains(s, "internalerror") ||
+		strings.Contains(s, "service unavailable") ||
+		strings.Contains(s, "unexpected eof") || strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "broken pipe")
 }
 
 // Download fetches an object and writes to destPath (retries on 503 SlowDown)
@@ -479,7 +498,26 @@ func (c *Client) Download(ctx context.Context, key, destPath string) error {
 		out.Body.Close()
 		f.Close()
 		if err != nil {
+			lastErr = err
 			os.Remove(destPath)
+			if attempt < maxRetries-1 && isRetryableS3Error(err) {
+				backoff := time.Duration(1<<uint(attempt)) * time.Second
+				if backoff > 30*time.Second {
+					backoff = 30 * time.Second
+				}
+				slog.Warn("Retrying object download after copy failure",
+					"key", key,
+					"attempt", attempt+1,
+					"max_attempts", maxRetries,
+					"backoff", backoff,
+					"err", err)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(backoff):
+				}
+				continue
+			}
 			return fmt.Errorf("copy: %w", err)
 		}
 		return nil
