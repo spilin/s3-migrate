@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"s3-migrate/config"
+	"s3-migrate/internal/gaps"
 	"s3-migrate/internal/migrator"
 	"s3-migrate/internal/s3client"
 )
@@ -53,6 +54,40 @@ func newMigrationSources(ctx context.Context, cfg *config.Config) ([]migrator.So
 		}
 		slog.Info("Using AWS S3 as migration source", "bucket", sa.Bucket, "prefix", sa.Prefix)
 		sources = append(sources, migrator.Source{
+			Name:   "s3",
+			Prefix: sa.Prefix,
+			Client: c,
+		})
+	}
+
+	return sources, nil
+}
+
+func newGapSources(ctx context.Context, cfg *config.Config) ([]gaps.Source, error) {
+	var sources []gaps.Source
+
+	if cfg.UseB2Source() {
+		sb := cfg.Source.B2
+		c, err := s3client.NewB2Client(ctx, sb.Region, sb.AccessKeyID, sb.SecretKey, sb.Bucket)
+		if err != nil {
+			return nil, err
+		}
+		slog.Info("Using Backblaze B2 as fix-gaps source", "bucket", sb.Bucket, "prefix", sb.Prefix)
+		sources = append(sources, gaps.Source{
+			Name:   "b2",
+			Prefix: sb.Prefix,
+			Client: c,
+		})
+	}
+
+	if cfg.UseAWSSource() {
+		sa := cfg.Source.AWS
+		c, err := s3client.NewS3Client(ctx, cfg.AWSSourceRegion(), sa.Endpoint, sa.Bucket, sa.AccessKeyID, sa.SecretKey)
+		if err != nil {
+			return nil, err
+		}
+		slog.Info("Using AWS S3 as fix-gaps source", "bucket", sa.Bucket, "prefix", sa.Prefix)
+		sources = append(sources, gaps.Source{
 			Name:   "s3",
 			Prefix: sa.Prefix,
 			Client: c,

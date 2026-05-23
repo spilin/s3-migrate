@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"s3-migrate/config"
+	"s3-migrate/internal/s3client"
 )
 
 const defaultNeardataBase = "https://mainnet.neardata.xyz/v0/block"
@@ -32,9 +33,17 @@ type Options struct {
 	NeardataBaseURL string // e.g. https://mainnet.neardata.xyz/v0/block (no trailing slash)
 	// NeardataAPIKey, if set, is passed as ?apiKey=... to neardata.xyz.
 	NeardataAPIKey string
-	DryRun          bool
+	DryRun         bool
 	// LogFile is JSONL path for gap_found / gap_filled / gap_fill_failed (empty = disabled).
 	LogFile string
+	Sources []Source
+}
+
+// Source is an ordered object-store source used by fix-gaps before neardata.
+type Source struct {
+	Name   string
+	Prefix string
+	Client *s3client.Client
 }
 
 // Run scans work_dir for batch_<first>_<last> directories, finds missing padded height folders,
@@ -136,6 +145,33 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) error {
 					blockURL := neardataBlockURL(base, h, apiKey)
 					if opts.DryRun {
 						slog.Info("dry-run: would fetch gap", "height", h, "dir", destDir)
+						return nil
+					}
+					if source, sourcePrefix, ok, err := fillHeightFromSources(gctx, opts.Sources,
+						cfg.DownloadConcurrency, cfg.PadWidth, batchDir, relPrefix, h); err != nil {
+						jl.appendLine(gapFillFailedLine{
+							Kind:         "gap_fill_failed",
+							GeneratedAt:  time.Now().UTC().Format(time.RFC3339),
+							Batch:        name,
+							Height:       h,
+							DestDir:      destDir,
+							Source:       source,
+							SourcePrefix: sourcePrefix,
+							NeardataURL:  blockURL,
+							Error:        err.Error(),
+						})
+						return fmt.Errorf("height %d: %w", h, err)
+					} else if ok {
+						jl.appendLine(gapFilledLine{
+							Kind:         "gap_filled",
+							GeneratedAt:  time.Now().UTC().Format(time.RFC3339),
+							Batch:        name,
+							Height:       h,
+							DestDir:      destDir,
+							Source:       source,
+							SourcePrefix: sourcePrefix,
+						})
+						slog.Info("Filled gap from source", "height", h, "dir", destDir, "source", source, "prefix", sourcePrefix)
 						return nil
 					}
 					if err := fetchAndWriteBlock(gctx, client, base, apiKey, destDir, h); err != nil {
@@ -346,6 +382,96 @@ func FillHeightFromNeardata(ctx context.Context, client *http.Client, neardataBa
 	return fetchAndWriteBlock(ctx, client, base, strings.TrimSpace(apiKey), destDir, height)
 }
 
+func fillHeightFromSources(ctx context.Context, sources []Source, concurrency, padWidth int, batchRoot, relPrefix string, height int64) (string, string, bool, error) {
+	for _, src := range sources {
+		if src.Client == nil {
+			continue
+		}
+		name := strings.TrimSpace(src.Name)
+		if name == "" {
+			name = "source"
+		}
+		prefix := sourceDirPrefix(src.Prefix, padWidth, height)
+		objects, err := src.Client.ListObjects(ctx, prefix)
+		if err != nil {
+			if s3client.IsFallbackableSourceError(err) {
+				slog.Info("Source unavailable or missing, trying next source",
+					"source", name, "height", height, "prefix", prefix, "err", err)
+				continue
+			}
+			return name, prefix, false, fmt.Errorf("list objects from %s under %s: %w", name, prefix, err)
+		}
+		if len(objects) == 0 {
+			slog.Debug("Source has no directory", "source", name, "height", height, "prefix", prefix)
+			continue
+		}
+
+		if err := downloadSourceObjects(ctx, src, objects, concurrency, filepath.Join(batchRoot, relPrefix)); err != nil {
+			if s3client.IsFallbackableSourceError(err) {
+				slog.Info("Source object unavailable or missing during download, trying next source",
+					"source", name, "height", height, "prefix", prefix, "err", err)
+				if rmErr := os.RemoveAll(filepath.Join(batchRoot, relPrefix, fmt.Sprintf("%0*d", padWidth, height))); rmErr != nil {
+					slog.Warn("Failed to remove partial height directory", "height", height, "err", rmErr)
+				}
+				continue
+			}
+			return name, prefix, false, fmt.Errorf("download directory %s from %s: %w", prefix, name, err)
+		}
+		return name, prefix, true, nil
+	}
+	return "", "", false, nil
+}
+
+func downloadSourceObjects(ctx context.Context, src Source, objects []s3client.ObjectInfo, concurrency int, destRoot string) error {
+	if concurrency < 1 {
+		concurrency = 10
+	}
+	sem := make(chan struct{}, concurrency)
+	g, gctx := errgroup.WithContext(ctx)
+
+	for _, obj := range objects {
+		obj := obj
+		g.Go(func() error {
+			select {
+			case <-gctx.Done():
+				return gctx.Err()
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			}
+
+			relKey := trimSourcePrefix(obj.Key, src.Prefix)
+			localPath := filepath.Join(destRoot, relKey)
+			slog.Debug("Downloading gap object", "key", obj.Key, "path", localPath)
+			if err := src.Client.Download(gctx, obj.Key, localPath); err != nil {
+				return fmt.Errorf("download %s: %w", obj.Key, err)
+			}
+			return nil
+		})
+	}
+	return g.Wait()
+}
+
+func sourceDirPrefix(sourcePrefix string, padWidth int, height int64) string {
+	dir := fmt.Sprintf("%0*d", padWidth, height)
+	base := strings.TrimSuffix(strings.TrimSpace(sourcePrefix), "/")
+	if base != "" {
+		base += "/"
+	}
+	return base + dir + "/"
+}
+
+func trimSourcePrefix(key, prefix string) string {
+	prefix = strings.TrimPrefix(strings.TrimSpace(prefix), "/")
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" {
+		return strings.TrimPrefix(key, "/")
+	}
+	if key == prefix {
+		return ""
+	}
+	return strings.TrimPrefix(strings.TrimPrefix(key, prefix+"/"), "/")
+}
+
 func writeJSONIndentFile(path string, raw json.RawMessage) error {
 	var v interface{}
 	if len(raw) == 0 {
@@ -430,22 +556,26 @@ type gapFoundLine struct {
 }
 
 type gapFilledLine struct {
-	Kind        string `json:"kind"`
-	GeneratedAt string `json:"generated_at"`
-	Batch       string `json:"batch"`
-	Height      int64  `json:"height"`
-	DestDir     string `json:"dest_dir"`
-	NeardataURL string `json:"neardata_url"`
+	Kind         string `json:"kind"`
+	GeneratedAt  string `json:"generated_at"`
+	Batch        string `json:"batch"`
+	Height       int64  `json:"height"`
+	DestDir      string `json:"dest_dir"`
+	Source       string `json:"source,omitempty"`
+	SourcePrefix string `json:"source_prefix,omitempty"`
+	NeardataURL  string `json:"neardata_url,omitempty"`
 }
 
 type gapFillFailedLine struct {
-	Kind        string `json:"kind"`
-	GeneratedAt string `json:"generated_at"`
-	Batch       string `json:"batch"`
-	Height      int64  `json:"height"`
-	DestDir     string `json:"dest_dir"`
-	NeardataURL string `json:"neardata_url"`
-	Error       string `json:"error"`
+	Kind         string `json:"kind"`
+	GeneratedAt  string `json:"generated_at"`
+	Batch        string `json:"batch"`
+	Height       int64  `json:"height"`
+	DestDir      string `json:"dest_dir"`
+	Source       string `json:"source,omitempty"`
+	SourcePrefix string `json:"source_prefix,omitempty"`
+	NeardataURL  string `json:"neardata_url,omitempty"`
+	Error        string `json:"error"`
 }
 
 type jsonlLogger struct {

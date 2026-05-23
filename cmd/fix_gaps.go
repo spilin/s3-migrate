@@ -24,10 +24,10 @@ func fixGapsCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "fix-gaps",
-		Short: "Fill missing block directories under batch_* using neardata.xyz API",
+		Short: "Fill missing block directories under batch_* from source or neardata",
 		Long: "Scans work_dir for batch_<first>_<last> folders from download, detects gaps in padded height " +
-			"subdirectories, fetches each missing height from neardata (same layout as download_fastnear.py: " +
-			"block.json + shard_<id>.json), and writes into the matching batch tree.",
+			"subdirectories, fetches each missing height from configured sources first and then neardata " +
+			"(same layout as download_fastnear.py: block.json + shard_<id>.json), and writes into the matching batch tree.",
 		PreRunE: func(cmd *cobra.Command, args []string) error {
 			configPath, err := cmd.Root().PersistentFlags().GetString("config")
 			if err != nil {
@@ -66,11 +66,16 @@ func fixGapsCmd() *cobra.Command {
 				}
 				logPath = abs
 			}
+			sources, err := newGapSources(ctx, loadedConfig)
+			if err != nil {
+				return fmt.Errorf("create fix-gaps sources: %w", err)
+			}
 			opts := gaps.Options{
 				NeardataBaseURL: neardataBase,
 				NeardataAPIKey:  neardataAPIKey,
 				DryRun:          dryRun,
 				LogFile:         logPath,
+				Sources:         sources,
 			}
 			if err := gaps.Run(ctx, loadedConfig, opts); err != nil && err != context.Canceled {
 				return err

@@ -1,4 +1,5 @@
-# Subcommand `fix-gaps` only needs work_dir, pad_width, download_concurrency (no source/destination).
+# Subcommand `fix-gaps` needs work_dir, pad_width, download_concurrency.
+# If source.* is configured, it tries sources first (B2 before S3/AWS), then falls back to neardata.
 # fix_gaps:
 #   log_file: fix_gaps.jsonl   # optional JSONL: gap_found, gap_filled, gap_fill_failed
 #
