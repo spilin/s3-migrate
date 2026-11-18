@@ -85,9 +85,16 @@ func runCmd() *cobra.Command {
 				slog.Info("Using S3-compatible destination (e.g. MinIO)", "endpoint", cfg.Destination.S3.Endpoint, "bucket", cfg.Destination.S3.Bucket)
 			}
 
+			blocksFallback, closeBlocksAPI, err := openBlocksAPI(cfg)
+			if err != nil {
+				return err
+			}
+			defer closeBlocksAPI()
+
 			opts := migrator.Options{
 				NeardataBaseURL: effectiveNeardataBaseURL(cmd, neardataBase, cfg),
 				NeardataAPIKey:  effectiveNeardataAPIKey(cmd, neardataAPIKey, cfg),
+				BlocksAPI:       blocksFallback,
 			}
 			if dynamicStopAt {
 				opts.RefreshStopAt = refreshStopAt

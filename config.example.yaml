@@ -118,3 +118,11 @@ stats_file: stats.jsonl # JSONL: migrate batch stats; validate-ranges appends a 
 
 near:
   rpc_url: https://rpc.mainnet.fastnear.com
+
+# Optional. On neardata HTTP 429, fetch that height from Blocks API instead of retrying.
+# The payload is the same {"block","shards"} document written as block.json + shard_*.json.
+# blocks_api:
+#   endpoint: producer005.nats.backend.aurora.dev:4300
+#   token: YOUR_BLOCKS_API_TOKEN
+#   stream: v2_mainnet_near_blocks # default when endpoint and token are set
+#   origin: "" # set only for multi-storage endpoints

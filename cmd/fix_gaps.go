@@ -70,9 +70,16 @@ func fixGapsCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("create fix-gaps sources: %w", err)
 			}
+			blocksFallback, closeBlocksAPI, err := openBlocksAPI(loadedConfig)
+			if err != nil {
+				return err
+			}
+			defer closeBlocksAPI()
+
 			opts := gaps.Options{
 				NeardataBaseURL: neardataBase,
 				NeardataAPIKey:  neardataAPIKey,
+				Fallback:        blocksFallback,
 				DryRun:          dryRun,
 				LogFile:         logPath,
 				Sources:         sources,

@@ -23,6 +23,12 @@ import (
 	"s3-migrate/internal/s3client"
 )
 
+// BlockFallback fetches one neardata-shaped JSON document ({"block","shards"}) for a height.
+// Used when neardata answers HTTP 429.
+type BlockFallback interface {
+	FetchBlockJSON(ctx context.Context, height int64) ([]byte, error)
+}
+
 const defaultNeardataBase = "https://mainnet.neardata.xyz/v0/block"
 
 // ErrNeardataNotFound is returned when neardata responds with HTTP 404 for a block height.
@@ -33,7 +39,9 @@ type Options struct {
 	NeardataBaseURL string // e.g. https://mainnet.neardata.xyz/v0/block (no trailing slash)
 	// NeardataAPIKey, if set, is passed as ?apiKey=... to neardata.xyz.
 	NeardataAPIKey string
-	DryRun         bool
+	// Fallback is used when neardata returns HTTP 429. Nil keeps the neardata retry loop.
+	Fallback BlockFallback
+	DryRun   bool
 	// LogFile is JSONL path for gap_found / gap_filled / gap_fill_failed (empty = disabled).
 	LogFile string
 	Sources []Source
@@ -174,7 +182,8 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) error {
 						slog.Info("Filled gap from source", "height", h, "dir", destDir, "source", source, "prefix", sourcePrefix)
 						return nil
 					}
-					if err := fetchAndWriteBlock(gctx, client, base, apiKey, destDir, h); err != nil {
+					sourceName, err := fetchAndWriteBlock(gctx, client, base, apiKey, destDir, h, opts.Fallback)
+					if err != nil {
 						jl.appendLine(gapFillFailedLine{
 							Kind:        "gap_fill_failed",
 							GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -186,15 +195,19 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) error {
 						})
 						return fmt.Errorf("height %d: %w", h, err)
 					}
-					jl.appendLine(gapFilledLine{
+					filled := gapFilledLine{
 						Kind:        "gap_filled",
 						GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 						Batch:       name,
 						Height:      h,
 						DestDir:     destDir,
-						NeardataURL: blockURL,
-					})
-					slog.Info("Filled gap", "height", h, "dir", destDir)
+						Source:      sourceName,
+					}
+					if sourceName == "neardata" {
+						filled.NeardataURL = blockURL
+					}
+					jl.appendLine(filled)
+					slog.Info("Filled gap", "height", h, "dir", destDir, "source", sourceName)
 					return nil
 				})
 			}
@@ -325,18 +338,44 @@ func shardIDString(raw json.RawMessage) (string, error) {
 	return "", fmt.Errorf("unsupported shard_id JSON: %s", string(raw))
 }
 
-func fetchAndWriteBlock(ctx context.Context, client *http.Client, baseURL, apiKey, destDir string, height int64) error {
-	body, status, err := httpGetWithRetry(ctx, client, neardataBlockURL(baseURL, height, apiKey))
+var errRateLimited = errors.New("neardata: rate limited")
+
+func fetchAndWriteBlock(ctx context.Context, client *http.Client, baseURL, apiKey, destDir string, height int64, fallback BlockFallback) (string, error) {
+	body, status, err := httpGetWithRetry(ctx, client, neardataBlockURL(baseURL, height, apiKey), fallback != nil)
+	if errors.Is(err, errRateLimited) {
+		return writeBlockFromFallback(ctx, fallback, destDir, height)
+	}
 	if err != nil {
-		return err
+		return "", err
 	}
 	if status == http.StatusNotFound {
-		return fmt.Errorf("height %d: %w", height, ErrNeardataNotFound)
+		return "", fmt.Errorf("height %d: %w", height, ErrNeardataNotFound)
 	}
 	if status != http.StatusOK {
-		return fmt.Errorf("neardata status %d for height %d", status, height)
+		return "", fmt.Errorf("neardata status %d for height %d", status, height)
 	}
+	if err := writeNeardataBody(destDir, height, body); err != nil {
+		return "", err
+	}
+	return "neardata", nil
+}
 
+func writeBlockFromFallback(ctx context.Context, fallback BlockFallback, destDir string, height int64) (string, error) {
+	if fallback == nil {
+		return "", fmt.Errorf("height %d: %w", height, errRateLimited)
+	}
+	slog.Warn("neardata rate limited, fetching from blocks-api", "height", height)
+	body, err := fallback.FetchBlockJSON(ctx, height)
+	if err != nil {
+		return "", fmt.Errorf("blocks-api height %d: %w", height, err)
+	}
+	if err := writeNeardataBody(destDir, height, body); err != nil {
+		return "", err
+	}
+	return "blocks-api", nil
+}
+
+func writeNeardataBody(destDir string, height int64, body []byte) error {
 	var env neardataEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
 		return fmt.Errorf("decode JSON height %d: %w", height, err)
@@ -371,15 +410,16 @@ func fetchAndWriteBlock(ctx context.Context, client *http.Client, baseURL, apiKe
 	return nil
 }
 
-// FillHeightFromNeardata fetches block + shards from neardata into batchRoot/relPrefix/<padded height>/.
-func FillHeightFromNeardata(ctx context.Context, client *http.Client, neardataBaseURL, apiKey, batchRoot, relPrefix string, padWidth int, height int64) error {
+// FillHeightFromNeardata fetches block + shards into batchRoot/relPrefix/<padded height>/.
+// fallback is consulted only after neardata returns HTTP 429. The returned source is "neardata" or "blocks-api".
+func FillHeightFromNeardata(ctx context.Context, client *http.Client, neardataBaseURL, apiKey, batchRoot, relPrefix string, padWidth int, height int64, fallback BlockFallback) (string, error) {
 	base := strings.TrimSuffix(strings.TrimSpace(neardataBaseURL), "/")
 	if base == "" {
 		base = defaultNeardataBase
 	}
 	padded := fmt.Sprintf("%0*d", padWidth, height)
 	destDir := filepath.Join(batchRoot, relPrefix, padded)
-	return fetchAndWriteBlock(ctx, client, base, strings.TrimSpace(apiKey), destDir, height)
+	return fetchAndWriteBlock(ctx, client, base, strings.TrimSpace(apiKey), destDir, height, fallback)
 }
 
 func fillHeightFromSources(ctx context.Context, sources []Source, concurrency, padWidth int, batchRoot, relPrefix string, height int64) (string, string, bool, error) {
@@ -497,7 +537,7 @@ func redactURLQuery(raw string) string {
 	return raw
 }
 
-func httpGetWithRetry(ctx context.Context, client *http.Client, url string) ([]byte, int, error) {
+func httpGetWithRetry(ctx context.Context, client *http.Client, url string, fallbackOnRateLimit bool) ([]byte, int, error) {
 	sleep := 200 * time.Millisecond
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -524,6 +564,9 @@ func httpGetWithRetry(ctx context.Context, client *http.Client, url string) ([]b
 		resp.Body.Close()
 		if rerr != nil {
 			return nil, resp.StatusCode, rerr
+		}
+		if resp.StatusCode == http.StatusTooManyRequests && fallbackOnRateLimit {
+			return nil, resp.StatusCode, errRateLimited
 		}
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 			if attempt >= 20 {

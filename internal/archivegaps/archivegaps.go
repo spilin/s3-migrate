@@ -35,7 +35,9 @@ var batchArchiveKeyRe = regexp.MustCompile(`(?i)^(?:(.+)/)?([0-9]+)-([0-9]+)\.ta
 type Options struct {
 	NeardataBaseURL string
 	NeardataAPIKey  string
-	DryRun          bool
+	// BlocksAPI is used when neardata returns HTTP 429.
+	BlocksAPI gaps.BlockFallback
+	DryRun    bool
 	// LogFile is JSONL path (archive_problem / archive_repaired / archive_repair_failed). If empty, uses cfg.ArchiveGapsLog.
 	LogFile string
 }
@@ -82,13 +84,13 @@ type archiveRepairFailedLine struct {
 
 // neardataBlockNotFoundLine is logged when neardata returns 404 for a height (data missing from API).
 type neardataBlockNotFoundLine struct {
-	Kind         string `json:"kind"`
-	GeneratedAt  string `json:"generated_at"`
-	ArchiveKey   string `json:"archive_key"`
-	BatchStart   int64  `json:"batch_start"`
-	BatchEnd     int64  `json:"batch_end"`
-	Height       int64  `json:"height"`
-	NeardataURL  string `json:"neardata_url"` // path only; apiKey omitted
+	Kind        string `json:"kind"`
+	GeneratedAt string `json:"generated_at"`
+	ArchiveKey  string `json:"archive_key"`
+	BatchStart  int64  `json:"batch_start"`
+	BatchEnd    int64  `json:"batch_end"`
+	Height      int64  `json:"height"`
+	NeardataURL string `json:"neardata_url"` // path only; apiKey omitted
 }
 
 type archiveRepairSkippedIncompleteLine struct {
@@ -396,8 +398,9 @@ func processOneArchive(
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			}
-			if err := gaps.FillHeightFromNeardata(egCtx, httpClient, opts.NeardataBaseURL, opts.NeardataAPIKey,
-				extractDir, relPrefix, cfg.PadWidth, h); err != nil {
+			source, err := gaps.FillHeightFromNeardata(egCtx, httpClient, opts.NeardataBaseURL, opts.NeardataAPIKey,
+				extractDir, relPrefix, cfg.PadWidth, h, opts.BlocksAPI)
+			if err != nil {
 				if errors.Is(err, gaps.ErrNeardataNotFound) {
 					jl.appendLine(neardataBlockNotFoundLine{
 						Kind:        "neardata_block_not_found",
@@ -413,7 +416,7 @@ func processOneArchive(
 				}
 				return fmt.Errorf("height %d: %w", h, err)
 			}
-			slog.Info("archive-gaps: refetched height from neardata", "key", ent.key, "height", h)
+			slog.Info("archive-gaps: refetched height", "key", ent.key, "height", h, "source", source)
 			return nil
 		})
 	}

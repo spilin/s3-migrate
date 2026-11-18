@@ -71,6 +71,8 @@ All settings can be overridden via env vars with `S3MIGRATE_` prefix.
 
 **S3 503 SlowDown:** Downloads automatically retry with exponential backoff (1s, 2s, 4s… up to 30s). If you still hit rate limits, lower `directory_concurrency` and `download_concurrency`.
 
+**Neardata 429:** `run`, `fix-gaps`, and `archive-gaps` fetch a missing height from `neardata.base_url`. When that responds with HTTP 429 and `blocks_api` is configured, that height is fetched once from Blocks API (`GetBlockMessage` on `blocks_api.stream`, bearer `blocks_api.token`) and written as the same `block.json` plus `shard_*.json`. Other neardata errors still retry. Leave `blocks_api` unset to keep retrying neardata. `stream` defaults to `v2_mainnet_near_blocks`.
+
 ## Same-process source cleanup
 
 `run` can start a background cleanup routine by setting `cleanup.enabled: true`. Cleanup has its own `cleanup.hot_window_blocks`, so you can archive with a smaller hot window while keeping source block directories (`block.json` plus `shard_*.json`) for longer before deleting them.

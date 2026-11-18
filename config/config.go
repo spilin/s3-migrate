@@ -93,6 +93,39 @@ type CleanupConfig struct {
 	DryRun          bool
 }
 
+// BlocksAPIConfig is the gRPC fallback used when neardata returns HTTP 429.
+type BlocksAPIConfig struct {
+	Endpoint string
+	Token    string
+	Stream   string
+	Origin   string
+}
+
+// Configured reports whether any blocks_api field is set.
+func (c BlocksAPIConfig) Configured() bool {
+	return strings.TrimSpace(c.Endpoint) != "" ||
+		strings.TrimSpace(c.Token) != "" ||
+		strings.TrimSpace(c.Stream) != "" ||
+		strings.TrimSpace(c.Origin) != ""
+}
+
+func (c *BlocksAPIConfig) normalize() error {
+	c.Endpoint = strings.TrimSpace(c.Endpoint)
+	c.Token = strings.TrimSpace(c.Token)
+	c.Stream = strings.TrimSpace(c.Stream)
+	c.Origin = strings.TrimSpace(c.Origin)
+	if !c.Configured() {
+		return nil
+	}
+	if c.Endpoint == "" || c.Token == "" {
+		return fmt.Errorf("blocks_api.endpoint and blocks_api.token are required together")
+	}
+	if c.Stream == "" {
+		c.Stream = "v2_mainnet_near_blocks"
+	}
+	return nil
+}
+
 // Config holds migration settings and nested source/destination.
 type Config struct {
 	Source      SourceConfig
@@ -124,6 +157,7 @@ type Config struct {
 	ArchivePrefix        string
 	NeardataBaseURL      string
 	NeardataAPIKey       string
+	BlocksAPI            BlocksAPIConfig
 	NearRPCURL           string
 	// FixGapsLog is optional JSONL path for fix-gaps (gap_found / gap_filled / gap_fill_failed lines).
 	FixGapsLog string
@@ -222,9 +256,15 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 		ArchivePrefix:        v.GetString("archive_prefix"),
 		NeardataBaseURL:      firstString(v, "neardata.base_url", "neardata_base_url", "neardata-base"),
 		NeardataAPIKey:       firstString(v, "neardata.api_key", "neardata_api_key", "neardataAPIKey"),
-		NearRPCURL:           firstString(v, "near.rpc_url", "near_rpc_url"),
-		FixGapsLog:           v.GetString("fix_gaps.log_file"),
-		ArchiveGapsLog:       v.GetString("archive_gaps.log_file"),
+		BlocksAPI: BlocksAPIConfig{
+			Endpoint: strings.TrimSpace(firstString(v, "blocks_api.endpoint", "blocks_api_endpoint")),
+			Token:    strings.TrimSpace(firstString(v, "blocks_api.token", "blocks_api_token")),
+			Stream:   strings.TrimSpace(firstString(v, "blocks_api.stream", "blocks_api_stream")),
+			Origin:   strings.TrimSpace(firstString(v, "blocks_api.origin", "blocks_api_origin")),
+		},
+		NearRPCURL:     firstString(v, "near.rpc_url", "near_rpc_url"),
+		FixGapsLog:     v.GetString("fix_gaps.log_file"),
+		ArchiveGapsLog: v.GetString("archive_gaps.log_file"),
 		Cleanup: CleanupConfig{
 			Enabled:         v.GetBool("cleanup.enabled"),
 			HotWindowBlocks: v.GetInt64("cleanup.hot_window_blocks"),
@@ -306,6 +346,9 @@ func loadFrom(path string, explicit bool, requireSource, requireDestination bool
 	cfg.ArchivePrefix = strings.TrimSuffix(cfg.ArchivePrefix, "/")
 	if cfg.NearRPCURL == "" {
 		cfg.NearRPCURL = "https://rpc.mainnet.fastnear.com"
+	}
+	if err := cfg.BlocksAPI.normalize(); err != nil {
+		return nil, err
 	}
 
 	// Validation

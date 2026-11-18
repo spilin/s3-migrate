@@ -67,9 +67,16 @@ func archiveGapsCmd() *cobra.Command {
 				return err
 			}
 
+			blocksFallback, closeBlocksAPI, err := openBlocksAPI(cfg)
+			if err != nil {
+				return err
+			}
+			defer closeBlocksAPI()
+
 			opts := archivegaps.Options{
 				NeardataBaseURL: effectiveNeardataBaseURL(cmd, neardataBase, cfg),
 				NeardataAPIKey:  effectiveNeardataAPIKey(cmd, neardataAPIKey, cfg),
+				BlocksAPI:       blocksFallback,
 				DryRun:          dryRun,
 				LogFile:         logPath,
 			}

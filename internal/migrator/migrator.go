@@ -36,7 +36,9 @@ type Source struct {
 type Options struct {
 	NeardataBaseURL string
 	NeardataAPIKey  string
-	RefreshStopAt   func(context.Context) (StopAtRefresh, error)
+	// BlocksAPI is used when neardata returns HTTP 429. Nil keeps retrying neardata.
+	BlocksAPI     gaps.BlockFallback
+	RefreshStopAt func(context.Context) (StopAtRefresh, error)
 }
 
 // StopAtRefresh is the latest chain height plus the rounded migration boundary.
@@ -257,7 +259,7 @@ func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
 					}
 
 					if !res.found {
-						dirSize, fetched, err := m.fillHeightFromNeardata(gctx, batchDir, n)
+						dirSize, fetched, source, err := m.fillHeightFromNeardata(gctx, batchDir, n)
 						if err != nil {
 							return err
 						}
@@ -265,7 +267,8 @@ func (m *Migrator) run(ctx context.Context, downloadOnly bool) error {
 							consecutiveEmpty.Store(0)
 							total := batchSizeBytes.Add(dirSize)
 							dirs := dirsDownloaded.Add(1)
-							slog.Info("Downloaded directory from neardata",
+							slog.Info("Downloaded directory",
+								"source", source,
 								"height", n,
 								"dir", m.dirPrefix(n),
 								"dir_size_mb", dirSize/(1024*1024),
@@ -489,25 +492,26 @@ func (m *Migrator) downloadHeightFromSources(ctx context.Context, height int64, 
 	return sourceDownloadResult{}, nil
 }
 
-func (m *Migrator) fillHeightFromNeardata(ctx context.Context, batchDir string, height int64) (int64, bool, error) {
+func (m *Migrator) fillHeightFromNeardata(ctx context.Context, batchDir string, height int64) (int64, bool, string, error) {
 	base := strings.TrimSpace(m.opts.NeardataBaseURL)
 	if base == "" {
-		return 0, false, nil
+		return 0, false, "", nil
 	}
-	if err := gaps.FillHeightFromNeardata(ctx, m.httpClient, base, m.opts.NeardataAPIKey,
-		batchDir, "", m.cfg.PadWidth, height); err != nil {
+	source, err := gaps.FillHeightFromNeardata(ctx, m.httpClient, base, m.opts.NeardataAPIKey,
+		batchDir, "", m.cfg.PadWidth, height, m.opts.BlocksAPI)
+	if err != nil {
 		if errors.Is(err, gaps.ErrNeardataNotFound) {
 			slog.Debug("Neardata has no block", "height", height, "url", gaps.NeardataBlockURL(base, height, ""))
-			return 0, false, nil
+			return 0, false, "", nil
 		}
-		return 0, false, fmt.Errorf("fetch height %d from neardata: %w", height, err)
+		return 0, false, "", fmt.Errorf("fetch height %d: %w", height, err)
 	}
 	dir := filepath.Join(batchDir, fmt.Sprintf("%0*d", m.cfg.PadWidth, height))
 	size, err := directorySize(dir)
 	if err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
-	return size, true, nil
+	return size, true, source, nil
 }
 
 // downloadDirectory downloads all objects under prefix to destDir in parallel, returns total bytes
