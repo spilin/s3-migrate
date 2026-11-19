@@ -411,7 +411,7 @@ func processOneArchive(
 						Height:      h,
 						NeardataURL: gaps.NeardataBlockURL(opts.NeardataBaseURL, h, ""),
 					})
-					slog.Info("archive-gaps: neardata 404 for height, skipping", "key", ent.key, "height", h)
+					slog.Info("archive-gaps: block not found, skipping", "key", ent.key, "height", h)
 					return nil
 				}
 				return fmt.Errorf("height %d: %w", h, err)

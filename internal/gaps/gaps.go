@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"s3-migrate/config"
+	"s3-migrate/internal/blocksapi"
 	"s3-migrate/internal/s3client"
 )
 
@@ -31,7 +32,7 @@ type BlockFallback interface {
 
 const defaultNeardataBase = "https://mainnet.neardata.xyz/v0/block"
 
-// ErrNeardataNotFound is returned when neardata responds with HTTP 404 for a block height.
+// ErrNeardataNotFound is returned when a height has no block: neardata HTTP 404, or Blocks API not-found after a 429.
 var ErrNeardataNotFound = errors.New("neardata: block not found")
 
 // Options configures fix-gaps HTTP and behavior.
@@ -367,6 +368,9 @@ func writeBlockFromFallback(ctx context.Context, fallback BlockFallback, destDir
 	slog.Warn("neardata rate limited, fetching from blocks-api", "height", height)
 	body, err := fallback.FetchBlockJSON(ctx, height)
 	if err != nil {
+		if errors.Is(err, blocksapi.ErrNotFound) {
+			return "", fmt.Errorf("height %d: %w", height, ErrNeardataNotFound)
+		}
 		return "", fmt.Errorf("blocks-api height %d: %w", height, err)
 	}
 	if err := writeNeardataBody(destDir, height, body); err != nil {

@@ -501,7 +501,7 @@ func (m *Migrator) fillHeightFromNeardata(ctx context.Context, batchDir string, 
 		batchDir, "", m.cfg.PadWidth, height, m.opts.BlocksAPI)
 	if err != nil {
 		if errors.Is(err, gaps.ErrNeardataNotFound) {
-			slog.Debug("Neardata has no block", "height", height, "url", gaps.NeardataBlockURL(base, height, ""))
+			slog.Debug("No block for height, skipping", "height", height, "url", gaps.NeardataBlockURL(base, height, ""))
 			return 0, false, "", nil
 		}
 		return 0, false, "", fmt.Errorf("fetch height %d: %w", height, err)

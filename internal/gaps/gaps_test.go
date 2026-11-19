@@ -2,10 +2,14 @@ package gaps
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+
+	"s3-migrate/internal/blocksapi"
 )
 
 func TestNeardataBlockURL_AppendsAPIKey(t *testing.T) {
@@ -73,5 +77,18 @@ func TestFetchAndWriteBlock_FallsBackOn429(t *testing.T) {
 	}
 	if _, err := os.Stat(dir + "/shard_0.json"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFetchAndWriteBlock_BlocksAPINotFoundSkips(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	fb := &stubFallback{err: fmt.Errorf("blocks-api height 10: %w", blocksapi.ErrNotFound)}
+	_, err := fetchAndWriteBlock(context.Background(), &http.Client{}, srv.URL, "", t.TempDir(), 10, fb)
+	if !errors.Is(err, ErrNeardataNotFound) {
+		t.Fatalf("err = %v, want ErrNeardataNotFound", err)
 	}
 }

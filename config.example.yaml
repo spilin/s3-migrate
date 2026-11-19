@@ -121,8 +121,15 @@ near:
 
 # Optional. On neardata HTTP 429, fetch that height from Blocks API instead of retrying.
 # The payload is the same {"block","shards"} document written as block.json + shard_*.json.
+# Use one of these. stream defaults to v2_mainnet_near_blocks, so testnet must set it.
+# Mainnet (host port 4300):
 # blocks_api:
 #   endpoint: producer005.nats.backend.aurora.dev:4300
 #   token: YOUR_BLOCKS_API_TOKEN
-#   stream: v2_mainnet_near_blocks # default when endpoint and token are set
+#   stream: v2_mainnet_near_blocks
 #   origin: "" # set only for multi-storage endpoints
+# Testnet (host port 4310, stream v2_testnet_near_blocks):
+# blocks_api:
+#   endpoint: producer001.nats.backend.aurora.dev:4310
+#   token: YOUR_BLOCKS_API_TOKEN
+#   stream: v2_testnet_near_blocks

@@ -71,7 +71,7 @@ All settings can be overridden via env vars with `S3MIGRATE_` prefix.
 
 **S3 503 SlowDown:** Downloads automatically retry with exponential backoff (1s, 2s, 4s… up to 30s). If you still hit rate limits, lower `directory_concurrency` and `download_concurrency`.
 
-**Neardata 429:** `run`, `fix-gaps`, and `archive-gaps` fetch a missing height from `neardata.base_url`. When that responds with HTTP 429 and `blocks_api` is configured, that height is fetched once from Blocks API (`GetBlockMessage` on `blocks_api.stream`, bearer `blocks_api.token`) and written as the same `block.json` plus `shard_*.json`. Other neardata errors still retry. Leave `blocks_api` unset to keep retrying neardata. `stream` defaults to `v2_mainnet_near_blocks`.
+**Neardata 429:** `run`, `fix-gaps`, and `archive-gaps` fetch a missing height from `neardata.base_url`. When that responds with HTTP 429 and `blocks_api` is configured, that height is fetched once from Blocks API (`GetBlockMessage` on `blocks_api.stream`, bearer `blocks_api.token`) and written as the same `block.json` plus `shard_*.json`. A Blocks API not-found is skipped like a neardata 404. Other neardata errors still retry. Leave `blocks_api` unset to keep retrying neardata. `stream` defaults to `v2_mainnet_near_blocks`. Testnet uses `producer001.nats.backend.aurora.dev:4310` and must set `stream` to `v2_testnet_near_blocks`.
 
 ## Same-process source cleanup
 
